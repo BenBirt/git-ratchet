@@ -17,17 +17,85 @@
 package gitutil
 
 import (
+	"bytes"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
+
+// Cmd is a git invocation under construction. Start one with [Git]:
+//
+//	out, err := gitutil.Git(dir).WithEnv("GIT_AUTHOR_NAME=x").Run("commit-tree", tree)
+//
+// Every git invocation in this package goes through [Cmd.Run].
+type Cmd struct {
+	repoDir string
+	env     []string
+	stdin   string
+}
+
+// Git starts a git invocation in repoDir.
+func Git(repoDir string) *Cmd { return &Cmd{repoDir: repoDir} }
+
+// WithEnv adds environment variables, each "KEY=value", on top of the current
+// environment.
+func (c *Cmd) WithEnv(env ...string) *Cmd {
+	c.env = append(c.env, env...)
+	return c
+}
+
+// WithStdin supplies the invocation's standard input.
+func (c *Cmd) WithStdin(in string) *Cmd {
+	c.stdin = in
+	return c
+}
+
+// Run invokes git and returns its standard output verbatim, so a caller
+// reading an object gets the bytes and nothing else. Standard error belongs to
+// the error instead, which is an [*ExitError] when git ran and exited non-zero.
+func (c *Cmd) Run(args ...string) (string, error) {
+	cmd := exec.Command("git", append([]string{"-C", c.repoDir}, args...)...)
+	if len(c.env) > 0 {
+		cmd.Env = append(os.Environ(), c.env...)
+	}
+	if c.stdin != "" {
+		cmd.Stdin = strings.NewReader(c.stdin)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+
+	if err := cmd.Run(); err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			msg := fmt.Sprintf("git %s: exit status %d", strings.Join(args, " "), exit.ExitCode())
+			if e := strings.TrimSpace(stderr.String()); e != "" {
+				msg = fmt.Sprintf("git %s: %s (exit status %d)", strings.Join(args, " "), e, exit.ExitCode())
+			}
+			return "", &ExitError{Code: exit.ExitCode(), msg: msg}
+		}
+		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
+	return stdout.String(), nil
+}
+
+// ExitError reports a git invocation that ran and exited non-zero. Callers
+// that treat a particular status as a result rather than a failure, such as
+// [IsAncestor], match on it with errors.As and read Code.
+type ExitError struct {
+	Code int
+	msg  string
+}
+
+func (e *ExitError) Error() string { return e.msg }
 
 // ResolveRef resolves a Git reference to the hash of the object it points to.
 // For branches and lightweight tags this is a commit hash; for annotated tags
 // this is the tag object hash (not the underlying commit hash).
 func ResolveRef(repoDir, ref string) (string, error) {
-	out, err := git(repoDir, "rev-parse", ref)
+	out, err := Git(repoDir).Run("rev-parse", ref)
 	if err != nil {
 		return "", fmt.Errorf("resolving %s: %w", ref, err)
 	}
@@ -36,7 +104,7 @@ func ResolveRef(repoDir, ref string) (string, error) {
 
 // RemoteURL returns the fetch URL of the "origin" remote.
 func RemoteURL(repoDir string) (string, error) {
-	out, err := git(repoDir, "remote", "get-url", "origin")
+	out, err := Git(repoDir).Run("remote", "get-url", "origin")
 	if err != nil {
 		return "", fmt.Errorf("getting remote URL: %w", err)
 	}
@@ -54,16 +122,13 @@ func checkpointRef(sourceRef string) string {
 // the corresponding checkpoint ref at it.
 // ref must be a full ref path, e.g. "refs/heads/main" or "refs/tags/v1.0".
 func StoreCheckpoint(repoDir, ref, checkpoint string) error {
-	cmd := exec.Command("git", "-C", repoDir, "hash-object", "-w", "--stdin")
-	cmd.Stdin = strings.NewReader(checkpoint)
-	out, err := cmd.Output()
+	blobHash, err := HashObject(repoDir, checkpoint)
 	if err != nil {
 		return fmt.Errorf("writing checkpoint blob: %w", err)
 	}
-	blobHash := strings.TrimSpace(string(out))
 
 	cpRef := checkpointRef(ref)
-	if _, err := git(repoDir, "update-ref", cpRef, blobHash); err != nil {
+	if _, err := Git(repoDir).Run("update-ref", cpRef, blobHash); err != nil {
 		return fmt.Errorf("updating ref %s: %w", cpRef, err)
 	}
 	return nil
@@ -72,16 +137,29 @@ func StoreCheckpoint(repoDir, ref, checkpoint string) error {
 // ReadCheckpoint reads the checkpoint blob for a ref.
 // ref must be a full ref path, e.g. "refs/heads/main" or "refs/tags/v1.0".
 func ReadCheckpoint(repoDir, ref string) (string, error) {
-	return git(repoDir, "cat-file", "-p", checkpointRef(ref))
+	return Git(repoDir).Run("cat-file", "-p", checkpointRef(ref))
 }
 
-func git(repoDir string, args ...string) (string, error) {
-	cmd := exec.Command("git", append([]string{"-C", repoDir}, args...)...)
-	out, err := cmd.CombinedOutput()
+// HashObject writes content to the object database as a blob and returns its
+// hash.
+func HashObject(repoDir, content string) (string, error) {
+	out, err := Git(repoDir).WithStdin(content).Run("hash-object", "-w", "--stdin")
 	if err != nil {
-		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
+		return "", fmt.Errorf("writing blob: %w", err)
 	}
-	return string(out), nil
+	return strings.TrimSpace(out), nil
+}
+
+// RefExists reports whether a ref is present in the repository.
+func RefExists(repoDir, ref string) bool {
+	_, err := Git(repoDir).Run("rev-parse", "--verify", "--quiet", ref)
+	return err == nil
+}
+
+// CatFile returns the contents of an object, addressed by any revision syntax
+// git understands (e.g. "refs/ratchet/log:tile/entries/000").
+func CatFile(repoDir, object string) (string, error) {
+	return Git(repoDir).Run("cat-file", "-p", object)
 }
 
 // IsAncestor reports whether ancestor is an ancestor-or-equal of descendant
@@ -92,14 +170,14 @@ func git(repoDir string, args ...string) (string, error) {
 // commit is not an ancestor. Returns a non-nil error only on git failures
 // (e.g. unknown commit hash, not a git repository).
 func IsAncestor(repoDir, ancestor, descendant string) (bool, error) {
-	cmd := exec.Command("git", "-C", repoDir, "merge-base", "--is-ancestor", ancestor, descendant)
-	out, err := cmd.CombinedOutput()
+	_, err := Git(repoDir).Run("merge-base", "--is-ancestor", ancestor, descendant)
 	if err != nil {
-		// Exit code 1 means "not an ancestor" — that is a valid, non-error result.
-		if cmd.ProcessState != nil && cmd.ProcessState.ExitCode() == 1 {
+		// Exit code 1 means "not an ancestor" — a result, not a failure.
+		var exit *ExitError
+		if errors.As(err, &exit) && exit.Code == 1 {
 			return false, nil
 		}
-		return false, fmt.Errorf("git merge-base --is-ancestor: %s: %w", strings.TrimSpace(string(out)), err)
+		return false, err
 	}
 	return true, nil
 }
@@ -112,7 +190,7 @@ func GetCommitChain(repoDir, oldCommit, newCommit string) ([]string, error) {
 		return nil, nil
 	}
 
-	out, err := git(repoDir, "rev-list", "--reverse", oldCommit+".."+newCommit)
+	out, err := Git(repoDir).Run("rev-list", "--reverse", oldCommit+".."+newCommit)
 	if err != nil {
 		return nil, fmt.Errorf("getting rev-list from %s to %s: %w", oldCommit, newCommit, err)
 	}
@@ -125,7 +203,7 @@ func GetCommitChain(repoDir, oldCommit, newCommit string) ([]string, error) {
 			continue
 		}
 		// Get raw commit content.
-		content, err := git(repoDir, "cat-file", "-p", commitHash)
+		content, err := Git(repoDir).Run("cat-file", "-p", commitHash)
 		if err != nil {
 			return nil, fmt.Errorf("reading commit %s: %w", commitHash, err)
 		}
