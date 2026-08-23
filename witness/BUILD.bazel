@@ -18,13 +18,19 @@ load("@tar.bzl", "mutate", "tar")
 
 go_library(
     name = "witness_lib",
-    srcs = ["main.go"],
+    srcs = [
+        "main.go",
+        "tlog.go",
+    ],
     importpath = "github.com/project-oak/git-ratchet/witness",
     visibility = ["//visibility:private"],
     deps = [
         "//internal/gitutil",
         "//internal/note",
+        "//internal/tlog",
         "//internal/witness",
+        "@com_github_transparency_dev_formats//log",
+        "@com_github_transparency_dev_formats//note",
     ],
 )
 
@@ -37,9 +43,17 @@ go_binary(
 
 go_test(
     name = "witness_test",
-    srcs = ["server_test.go"],
+    srcs = [
+        "server_test.go",
+        "tlog_test.go",
+    ],
     data = [":witness"],  # keep
-    deps = ["//internal/note"],
+    embed = [":witness_lib"],
+    deps = [
+        "//internal/note",
+        "//internal/tlog",
+        "//internal/witness",
+    ],
 )
 
 tar(
