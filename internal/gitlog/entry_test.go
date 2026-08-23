@@ -17,6 +17,8 @@ package gitlog
 import (
 	"strings"
 	"testing"
+
+	"github.com/transparency-dev/tessera/api"
 )
 
 const testObject = "4f0f30afb02b71590f0b2e0a67f0b846715e1d04"
@@ -131,5 +133,49 @@ func TestNewRefRecordValidates(t *testing.T) {
 	// SHA-256 repositories use 64-character hashes.
 	if _, err := NewRefRecord("refs/heads/main", strings.Repeat("a", 64)); err != nil {
 		t.Errorf("a SHA-256 object hash should be accepted: %v", err)
+	}
+}
+
+// TestBundleEncodingMatchesReference pins our writer against the tlog-tiles
+// reference decoder. Writing bundles in a format only we could read is the
+// defect this test exists to prevent.
+func TestBundleEncodingMatchesReference(t *testing.T) {
+	entries := []Entry{
+		mustRefRecord(t, "refs/heads/main", obj("aaaa")),
+		mustRefRecord(t, "refs/tags/v1.0.0", obj("bbbb")),
+	}
+	// An entry containing newlines and a blank line, which the length-prefixed
+	// framing must carry without any escaping.
+	awkward, err := ParseEntry([]byte("tombstone/v1\n" + testObject + " refs/heads/main\nline one\n\nline two\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries = append(entries, awkward)
+
+	raw, err := marshalBundle(entries)
+	if err != nil {
+		t.Fatalf("marshalBundle: %v", err)
+	}
+
+	var bundle api.EntryBundle
+	if err := bundle.UnmarshalText(raw); err != nil {
+		t.Fatalf("the reference decoder rejected our bundle: %v", err)
+	}
+	if len(bundle.Entries) != len(entries) {
+		t.Fatalf("decoded %d entries, want %d", len(bundle.Entries), len(entries))
+	}
+	for i := range entries {
+		if string(bundle.Entries[i]) != string(entries[i].raw) {
+			t.Errorf("entry %d did not survive the round trip:\ngot  %q\nwant %q",
+				i, bundle.Entries[i], entries[i].raw)
+		}
+	}
+}
+
+func TestMarshalBundleRejectsOversizedEntry(t *testing.T) {
+	// Construct an entry larger than a uint16 length prefix can describe.
+	big := Entry{raw: []byte("x/v1\n" + strings.Repeat("a", MaxEntrySize) + "\n"), Type: "x/v1"}
+	if _, err := marshalBundle([]Entry{big}); err == nil {
+		t.Error("expected an oversized entry to be rejected")
 	}
 }

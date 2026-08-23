@@ -14,7 +14,10 @@ require (
 	github.com/transparency-dev/merkle v0.0.2
 )
 
-require golang.org/x/mod v0.40.0
+require (
+	github.com/transparency-dev/tessera v1.0.4
+	golang.org/x/mod v0.40.0
+)
 
 require (
 	cloud.google.com/go v0.123.0 // indirect

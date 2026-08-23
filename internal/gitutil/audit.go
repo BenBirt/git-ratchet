@@ -16,7 +16,6 @@ package gitutil
 
 import (
 	"fmt"
-	"os/exec"
 	"strings"
 )
 
@@ -24,10 +23,8 @@ import (
 // error if the object database is inconsistent (hash mismatches, missing
 // objects, malformed DAG structure, etc.).
 func Fsck(repoDir string) error {
-	cmd := exec.Command("git", "-C", repoDir, "fsck", "--no-progress")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("git fsck: %s", strings.TrimSpace(string(out)))
+	if _, err := Git(repoDir).Run("fsck", "--no-progress"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -35,12 +32,11 @@ func Fsck(repoDir string) error {
 // ListReplaceRefs returns all refs under refs/replace/. An empty slice means
 // no replace refs exist.
 func ListReplaceRefs(repoDir string) ([]string, error) {
-	cmd := exec.Command("git", "-C", repoDir, "for-each-ref", "--format=%(refname)", "refs/replace/")
-	out, err := cmd.CombinedOutput()
+	out, err := Git(repoDir).Run("for-each-ref", "--format=%(refname)", "refs/replace/")
 	if err != nil {
-		return nil, fmt.Errorf("listing replace refs: %s: %w", strings.TrimSpace(string(out)), err)
+		return nil, fmt.Errorf("listing replace refs: %w", err)
 	}
-	trimmed := strings.TrimSpace(string(out))
+	trimmed := strings.TrimSpace(out)
 	if trimmed == "" {
 		return nil, nil
 	}
