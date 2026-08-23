@@ -29,30 +29,19 @@ import (
 // Signatures over C2SP tlog-checkpoint notes are produced and verified by
 // github.com/transparency-dev/formats, not by the constructions in note.go.
 //
-// The two disagree about ML-DSA-44, and formats is right. C2SP signed-note
-// assigns 0x06 to "timestamped ML-DSA-44 (sub)tree cosignatures" and assigns
-// nothing to a plain ML-DSA-44 signature over a note's text, so an ML-DSA-44
-// signature is always the cosigned_message construction — a binary structure
-// committing to the cosigner's name, a timestamp, the log origin, a leaf range
-// and a Merkle root. A log signing its own checkpoint signs exactly the message
-// a witness would, over the range [0, size). That is well defined only over a
-// tlog-checkpoint, which is why git-checkpoint mode is Ed25519-only.
+// C2SP signed-note assigns 0x06 only to the ML-DSA-44 cosigned_message, which
+// commits to a log origin, a leaf range and a Merkle root, so it is defined
+// only over a tlog-checkpoint. A log signing its own checkpoint signs the same
+// message a witness would, over [0, size); git-checkpoint mode is Ed25519-only.
 //
-// For Ed25519 the two agree, and the wire encodings match throughout: the
-// algorithm bytes are the same (0x01 origin, 0x04 cosigner, 0x06 ML-DSA-44),
-// the key hash is SHA-256(name || "\n" || algorithm || public key) truncated to
-// four bytes in both, and a signature is keyHash(4) || signature, with an
-// 8-byte big-endian timestamp ahead of the signature for the cosignature types.
-// Verifier keys therefore need no conversion at all.
+// Key hashes and verifier keys are encoded identically here and in formats, so
+// they pass between the two unconverted.
 
 // skeyForFormats renders a signer's private key in the "PRIVATE+KEY+..."
 // encoding the formats package parses.
 //
-// TODO: migrate the on-disk key format to this encoding so keys can be read
-// straight into a formats signer, and delete this shim. The formats encoding
-// carries the algorithm byte alongside the seed, which is what lets a single
-// parser accept any algorithm; ours splits that across the vkey line and the
-// seed line, and needs the caller to say which role the key plays.
+// TODO: migrate the on-disk key format to this encoding, so keys can be read
+// straight into a formats signer, and delete this shim.
 func skeyForFormats(s *Signer) (string, error) {
 	switch s.SigType {
 	case Ed25519Origin, Ed25519Cosigner, MLDSA44:
@@ -95,10 +84,8 @@ func SignTlogCheckpoint(body string, signer *Signer) (string, error) {
 
 	switch signer.SigType {
 	case Ed25519Origin:
-		// 0x01 is a plain note signature over the body, which is what Sign
-		// already produces, byte for byte. Going through the formats signer
-		// instead would rule out KMS-backed keys, which hold no local seed
-		// for the shim to render.
+		// Sign already emits this construction. It must stay: a KMS-backed
+		// key has no local seed for skeyForFormats to render.
 		return Sign(body, signer)
 
 	case MLDSA44:
@@ -116,11 +103,6 @@ func SignTlogCheckpoint(body string, signer *Signer) (string, error) {
 		return "", fmt.Errorf("unsupported log signature type: 0x%02x", signer.SigType)
 	}
 }
-
-// Verifying a signed tlog-checkpoint has no wrapper here: log.ParseCheckpoint
-// in transparency-dev/formats opens the note, confirms the log signed it, and
-// checks the origin line against the log's key name, which is every check a
-// caller needs and one more than a bare note.Open gives.
 
 // CosignTlogCheckpoint creates a cosignature line for a signed tlog-checkpoint.
 // The signer must have RoleCosigner.
@@ -142,8 +124,8 @@ func CosignTlogCheckpoint(signedNote string, signer *Signer) (string, error) {
 	}
 
 	if signer.SigType == Ed25519Cosigner {
-		// As in SignTlogCheckpoint: the 0x04 construction is the one Cosign
-		// already produces, and taking it keeps KMS-backed keys working.
+		// As in SignTlogCheckpoint: Cosign emits this construction, and works
+		// with KMS-backed keys.
 		return Cosign(signedNote, signer)
 	}
 	if signer.SigType != MLDSA44 {
