@@ -63,28 +63,34 @@ func TestEd25519SignVerify(t *testing.T) {
 	}
 }
 
-func TestMLDSA44SignVerify(t *testing.T) {
-	s, err := GenerateKey("test-origin-pq", MLDSA44, RoleOrigin)
+// git-checkpoint notes are Ed25519-only. C2SP signed-note assigns 0x06 to the
+// ML-DSA-44 cosigned_message, which commits to a log origin, a leaf range and a
+// Merkle root; a git-checkpoint note has none of those. See internal/note/tlog.go.
+func TestMLDSA44RejectedForGitCheckpoint(t *testing.T) {
+	origin, err := GenerateKey("test-origin-pq", MLDSA44, RoleOrigin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	witness, err := GenerateKey("test-witness-pq", MLDSA44, RoleCosigner)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	body := "example.com refs/heads/main\nabc123\n"
-	signed, err := Sign(body, s)
+	if _, err := Sign(body, origin); err == nil {
+		t.Error("expected Sign to reject an ML-DSA-44 key")
+	}
+
+	edOrigin, err := GenerateKey("test-origin", Ed25519Origin, RoleOrigin)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	_, sigLines, err := ParseSignedNote(signed)
+	signed, err := Sign(body, edOrigin)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sigLines) != 1 {
-		t.Fatalf("expected 1 sig line, got %d", len(sigLines))
-	}
-
-	if err := VerifySignature(body, sigLines[0], s.pub, MLDSA44); err != nil {
-		t.Fatalf("verify failed: %v", err)
+	if _, err := Cosign(signed, witness); err == nil {
+		t.Error("expected Cosign to reject an ML-DSA-44 key")
 	}
 }
 
@@ -114,38 +120,7 @@ func TestEd25519CosignVerify(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := VerifyCosignature(noteBody, cosigLine, witness.pub, Ed25519Cosigner, witness.Name); err != nil {
-		t.Fatalf("cosig verify failed: %v", err)
-	}
-}
-
-func TestMLDSA44CosignVerify(t *testing.T) {
-	origin, err := GenerateKey("test-origin-pq", MLDSA44, RoleOrigin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	witness, err := GenerateKey("test-witness-pq", MLDSA44, RoleCosigner)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	body := "example.com refs/heads/main\nabc123\n"
-	signed, err := Sign(body, origin)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	cosigLine, err := Cosign(signed, witness)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	noteBody, err := ExtractBody(signed)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if err := VerifyCosignature(noteBody, cosigLine, witness.pub, MLDSA44, witness.Name); err != nil {
+	if err := VerifyCosignature(noteBody, cosigLine, witness.pub, Ed25519Cosigner); err != nil {
 		t.Fatalf("cosig verify failed: %v", err)
 	}
 }
@@ -268,18 +243,15 @@ func TestCrossAlgorithmRejection(t *testing.T) {
 
 	body := "example.com refs/heads/main\nabc123\n"
 
-	// Sign with Ed25519, try to verify with ML-DSA-44 key.
+	// Sign with Ed25519, try to verify with an ML-DSA-44 key.
 	signed, _ := Sign(body, ed)
 	_, sigs, _ := ParseSignedNote(signed)
 	if err := VerifySignature(body, sigs[0], ml.pub, MLDSA44); err == nil {
 		t.Error("expected cross-algorithm verification to fail (Ed25519 sig, ML-DSA key)")
 	}
-
-	// Sign with ML-DSA-44, try to verify with Ed25519 key.
-	signed2, _ := Sign(body, ml)
-	_, sigs2, _ := ParseSignedNote(signed2)
-	if err := VerifySignature(body, sigs2[0], ed.pub, Ed25519Origin); err == nil {
-		t.Error("expected cross-algorithm verification to fail (ML-DSA sig, Ed25519 key)")
+	// And with an Ed25519 key under the wrong type byte.
+	if err := VerifySignature(body, sigs[0], ed.pub, Ed25519Cosigner); err == nil {
+		t.Error("expected verification to fail under the cosigner type byte")
 	}
 }
 
@@ -329,30 +301,6 @@ func TestCosignRequiresCosignerRole(t *testing.T) {
 	signed, _ := Sign("body\n", origin)
 	if _, err := Cosign(signed, origin); err == nil {
 		t.Error("expected Cosign to reject origin role")
-	}
-}
-
-func TestMLDSA44CosignedMessageFormat(t *testing.T) {
-	// Verify the binary message structure has the right label and fields.
-	msg, err := buildCosignedMessage("my-witness", 1234567890, "example.com refs/heads/main\nabc123\n")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Check label.
-	expectedLabel := [12]byte{'s', 'u', 'b', 't', 'r', 'e', 'e', '/', 'v', '1', '\n', 0}
-	if string(msg[:12]) != string(expectedLabel[:]) {
-		t.Errorf("label mismatch: got %q, want %q", msg[:12], expectedLabel[:])
-	}
-
-	// Check cosigner name length prefix.
-	nameLen := int(msg[12])
-	if nameLen != len("my-witness") {
-		t.Errorf("cosigner name length: got %d, want %d", nameLen, len("my-witness"))
-	}
-	cosignerName := string(msg[13 : 13+nameLen])
-	if cosignerName != "my-witness" {
-		t.Errorf("cosigner name: got %q, want %q", cosignerName, "my-witness")
 	}
 }
 

@@ -183,7 +183,7 @@ func TestAddCheckpointFirstSubmission(t *testing.T) {
 		t.Fatalf("parsing witness vkey: %v", err)
 	}
 	noteBody := "example.com/repo refs/heads/main\n" + commit + "\n"
-	if err := note.VerifyCosignature(noteBody, body, witnessPub, note.Ed25519Cosigner, "test-witness"); err != nil {
+	if err := note.VerifyCosignature(noteBody, body, witnessPub, note.Ed25519Cosigner); err != nil {
 		t.Errorf("cosignature verification failed: %v", err)
 	}
 }
@@ -213,7 +213,7 @@ func TestAddCheckpointFirstSubmissionSHA256(t *testing.T) {
 		t.Fatalf("parsing witness vkey: %v", err)
 	}
 	noteBody := "example.com/repo refs/heads/main\n" + commit + "\n"
-	if err := note.VerifyCosignature(noteBody, body, witnessPub, note.Ed25519Cosigner, "test-witness"); err != nil {
+	if err := note.VerifyCosignature(noteBody, body, witnessPub, note.Ed25519Cosigner); err != nil {
 		t.Errorf("cosignature verification failed: %v", err)
 	}
 }

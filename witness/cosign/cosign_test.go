@@ -198,7 +198,7 @@ func TestCosignFirstCheckpoint(t *testing.T) {
 		t.Fatalf("parsing witness vkey: %v", err)
 	}
 	noteBody := "example.com/repo refs/heads/main\n" + commit + "\n"
-	if err := note.VerifyCosignature(noteBody, cosigLine, witnessPub, note.Ed25519Cosigner, "test-witness"); err != nil {
+	if err := note.VerifyCosignature(noteBody, cosigLine, witnessPub, note.Ed25519Cosigner); err != nil {
 		t.Errorf("cosignature verification failed: %v", err)
 	}
 }
