@@ -23,8 +23,31 @@ import (
 	"strings"
 	"testing"
 
+	flog "github.com/transparency-dev/formats/log"
+	fnote "github.com/transparency-dev/formats/note"
+
 	"github.com/project-oak/git-ratchet/internal/note"
+	"github.com/project-oak/git-ratchet/internal/tlog"
 )
+
+// verifyTlogCheckpoint checks that a signed tlog-checkpoint carries a valid
+// signature from the key in vkey, using the same call the rest of the
+// codebase does.
+func verifyTlogCheckpoint(signedNote, origin, vkey string) error {
+	v, err := fnote.NewVerifier(vkey)
+	if err != nil {
+		return err
+	}
+	_, _, _, err = flog.ParseCheckpoint([]byte(signedNote), origin, v)
+	return err
+}
+
+// tlogCheckpointBody is a C2SP tlog-checkpoint body. ML-DSA-44 keys sign and
+// cosign only these: 0x06 denotes the cosigned_message construction, which
+// commits to a log origin, a leaf range and a Merkle root.
+func tlogCheckpointBody(origin string) string {
+	return string(tlog.NewCheckpoint(origin, 7, tlog.HashLeaf([]byte("root"))).Marshal())
+}
 
 func mustFindBinary(t *testing.T) string {
 	t.Helper()
@@ -178,18 +201,17 @@ func TestGenKey_Origin_MLDSA(t *testing.T) {
 		t.Fatalf("round-trip vkey mismatch: got %s, want %s", readSigner.VKey(), vkey)
 	}
 
-	testBody := "test-origin-pq refs/heads/main\n0123456789abcdef0123456789abcdef01234567\n"
-	signedNote, err := note.Sign(testBody, readSigner)
+	signedNote, err := note.SignTlogCheckpoint(tlogCheckpointBody("test-origin-pq"), readSigner)
 	if err != nil {
-		t.Fatalf("note.Sign: %v", err)
+		t.Fatalf("note.SignTlogCheckpoint: %v", err)
 	}
 
-	body, sigLines, err := note.ParseSignedNote(signedNote)
+	_, sigLines, err := note.ParseSignedNote(signedNote)
 	if err != nil {
 		t.Fatalf("note.ParseSignedNote: %v", err)
 	}
 
-	pubName, sigType, pubKey, err := note.ParseVKey(vkey)
+	pubName, _, _, err := note.ParseVKey(vkey)
 	if err != nil {
 		t.Fatalf("note.ParseVKey: %v", err)
 	}
@@ -201,7 +223,7 @@ func TestGenKey_Origin_MLDSA(t *testing.T) {
 		t.Fatalf("expected 1 signature line, got %d", len(sigLines))
 	}
 
-	if err := note.VerifySignature(body, sigLines[0], pubKey, sigType); err != nil {
+	if err := verifyTlogCheckpoint(signedNote, "test-origin-pq", vkey); err != nil {
 		t.Fatalf("signature verification failed: %v", err)
 	}
 }
@@ -285,7 +307,7 @@ func TestGenKey_Witness_Ed25519(t *testing.T) {
 		t.Fatalf("note.ExtractBody: %v", err)
 	}
 
-	if err := note.VerifyCosignature(body, cosigLine, pubKey, sigType, pubName); err != nil {
+	if err := note.VerifyCosignature(body, cosigLine, pubKey, sigType); err != nil {
 		t.Fatalf("cosignature verification failed: %v", err)
 	}
 }
@@ -345,18 +367,17 @@ func TestGenKey_Witness_MLDSA(t *testing.T) {
 		t.Fatalf("GenerateKey origin: %v", err)
 	}
 
-	testBody := "test-origin refs/heads/main\n0123456789abcdef0123456789abcdef01234567\n"
-	signedNote, err := note.Sign(testBody, originSigner)
+	signedNote, err := note.SignTlogCheckpoint(tlogCheckpointBody("test-origin"), originSigner)
 	if err != nil {
-		t.Fatalf("note.Sign: %v", err)
+		t.Fatalf("note.SignTlogCheckpoint: %v", err)
 	}
 
-	cosigLine, err := note.Cosign(signedNote, readSigner)
+	cosigLine, err := note.CosignTlogCheckpoint(signedNote, readSigner)
 	if err != nil {
-		t.Fatalf("note.Cosign: %v", err)
+		t.Fatalf("note.CosignTlogCheckpoint: %v", err)
 	}
 
-	pubName, sigType, pubKey, err := note.ParseVKey(vkey)
+	pubName, _, _, err := note.ParseVKey(vkey)
 	if err != nil {
 		t.Fatalf("note.ParseVKey: %v", err)
 	}
@@ -364,12 +385,7 @@ func TestGenKey_Witness_MLDSA(t *testing.T) {
 		t.Fatalf("expected pubName test-witness-pq, got %s", pubName)
 	}
 
-	body, err := note.ExtractBody(signedNote)
-	if err != nil {
-		t.Fatalf("note.ExtractBody: %v", err)
-	}
-
-	if err := note.VerifyCosignature(body, cosigLine, pubKey, sigType, pubName); err != nil {
+	if err := verifyTlogCheckpoint(note.AppendSignature(signedNote, cosigLine), "test-origin", vkey); err != nil {
 		t.Fatalf("cosignature verification failed: %v", err)
 	}
 }
