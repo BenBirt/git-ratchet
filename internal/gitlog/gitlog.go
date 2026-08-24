@@ -190,12 +190,47 @@ func (l *Log) Append(e Entry) {
 	l.entries = append(l.entries, e)
 }
 
+// Checkpointed returns the prefix of the log that a checkpoint of the given
+// size commits to.
+//
+// Entries beyond that size are present in the ref but no witness has attested
+// to them, so they are left out: anyone who can push to the log ref can append,
+// and only the cosigned tree means anything. A log holding fewer entries than
+// the checkpoint claims is a different matter and an error, because entries a
+// quorum did attest to have gone missing.
+func (l *Log) Checkpointed(size uint64) (*View, error) {
+	if size > l.Size() {
+		return nil, fmt.Errorf("checkpoint commits to %d entries but the log holds %d", size, l.Size())
+	}
+	return &View{entries: l.entries[:size]}, nil
+}
+
+// View is the part of a log that a cosigned checkpoint commits to. It is what
+// verification reads; a [Log] is what checkpointing writes.
+type View struct {
+	entries []Entry
+}
+
+// Size is the number of entries in the view, which is the size of the tree the
+// checkpoint committed to.
+func (v *View) Size() uint64 { return tlog.Count(len(v.entries)) }
+
+// Root returns the Merkle tree hash over the view's entries, which must equal
+// the root hash in the checkpoint that produced it.
+func (v *View) Root() tlog.Hash {
+	hashes := make([]tlog.Hash, len(v.entries))
+	for i, e := range v.entries {
+		hashes[i] = e.LeafHash()
+	}
+	return tlog.Root(hashes)
+}
+
 // RefRecords returns the decoded ref-record entries naming a ref, in log
 // order. Entries of any other type, including types this implementation does
 // not recognise, are not included.
-func (l *Log) RefRecords(ref string) ([]RefRecord, error) {
+func (v *View) RefRecords(ref string) ([]RefRecord, error) {
 	var out []RefRecord
-	for i, e := range l.entries {
+	for i, e := range v.entries {
 		if e.Type != TypeRefRecord {
 			continue
 		}

@@ -16,10 +16,19 @@ load("@rules_go//go:def.bzl", "go_test")
 
 go_test(
     name = "e2e_test",
-    srcs = ["integration_test.go"],
+    srcs = [
+        "integration_test.go",
+        "tlog_test.go",
+    ],
     data = [
         "//:git-ratchet",
         "//witness",
     ],
-    deps = ["//internal/note"],
+    deps = [
+        "//internal/note",
+        "@com_github_transparency_dev_formats//note",
+        "@com_github_transparency_dev_witness//persistence/inmemory",
+        "@com_github_transparency_dev_witness//witness",
+        "@org_golang_x_mod//sumdb/note",
+    ],
 )

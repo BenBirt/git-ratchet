@@ -22,6 +22,9 @@ import (
 	"strings"
 	"testing"
 
+	mproof "github.com/transparency-dev/merkle/proof"
+	"github.com/transparency-dev/merkle/rfc6962"
+
 	"github.com/project-oak/git-ratchet/internal/tlog"
 )
 
@@ -93,7 +96,7 @@ func TestOpenEmptyRepo(t *testing.T) {
 	if l.StoredCheckpoint() != "" {
 		t.Errorf("StoredCheckpoint() = %q, want empty", l.StoredCheckpoint())
 	}
-	if l.Root() != tlog.EmptyRoot() {
+	if l.Root() != tlog.Root(nil) {
 		t.Error("an empty log should have the empty tree root")
 	}
 }
@@ -193,7 +196,7 @@ func TestSaveRejectsConcurrentAdvance(t *testing.T) {
 	if final.Size() != 2 {
 		t.Fatalf("Size() = %d, want 2", final.Size())
 	}
-	mains, err := final.RefRecords("refs/heads/main")
+	mains, err := mustView(t, final).RefRecords("refs/heads/main")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +259,7 @@ func TestRefRecordsFiltersByRef(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mains, err := l.RefRecords("refs/heads/main")
+	mains, err := mustView(t, l).RefRecords("refs/heads/main")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +267,7 @@ func TestRefRecordsFiltersByRef(t *testing.T) {
 		t.Errorf("RefRecords(main) = %+v", mains)
 	}
 
-	absent, err := l.RefRecords("refs/heads/absent")
+	absent, err := mustView(t, l).RefRecords("refs/heads/absent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,13 +295,21 @@ func TestProofsAgainstStoredLog(t *testing.T) {
 	reopened := mustOpen(t, dir)
 	root := reopened.Root()
 
-	for m := uint64(0); m <= 20; m++ {
-		proof, err := reopened.ConsistencyProofFrom(m)
+	// Verified with the merkle library's own verifier: what is under test is
+	// that a log round-tripped through Git yields the leaves the proof is
+	// generated from. m starts at 1 because a proof from the empty tree has
+	// nothing to prove.
+	for m := uint64(1); m <= 20; m++ {
+		p, err := reopened.ConsistencyProofFrom(m)
 		if err != nil {
 			t.Fatalf("ConsistencyProofFrom(%d): %v", m, err)
 		}
 		oldRoot := tlog.Root(reopened.leafHashes()[:m])
-		if err := tlog.VerifyConsistency(oldRoot, root, proof, m, 20); err != nil {
+		raw := make([][]byte, 0, len(p))
+		for _, h := range p {
+			raw = append(raw, h[:])
+		}
+		if err := mproof.VerifyConsistency(rfc6962.DefaultHasher, m, 20, raw, oldRoot[:], root[:]); err != nil {
 			t.Errorf("VerifyConsistency(%d): %v", m, err)
 		}
 	}
@@ -328,11 +339,83 @@ func TestUnknownTypesAreSkipped(t *testing.T) {
 	if reopened.Size() != 2 {
 		t.Fatalf("Size() = %d, want 2: an unknown entry still occupies a leaf", reopened.Size())
 	}
-	mains, err := reopened.RefRecords("refs/heads/main")
+	mains, err := mustView(t, reopened).RefRecords("refs/heads/main")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(mains) != 1 {
 		t.Errorf("RefRecords(main) = %+v, want only the ref-record entry", mains)
+	}
+}
+
+// mustView returns a view over every entry the log holds, which is the tree a
+// checkpoint taken now would commit to.
+func mustView(t *testing.T, l *Log) *View {
+	t.Helper()
+	v, err := l.Checkpointed(l.Size())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
+
+// TestCheckpointedIgnoresUnwitnessedEntries covers the trust boundary: entries
+// past the checkpoint's size are in the ref but no witness attested to them,
+// and anyone who can push to the log ref can put them there.
+func TestCheckpointedIgnoresUnwitnessedEntries(t *testing.T) {
+	dir := initRepo(t)
+	l := mustOpen(t, dir)
+	l.Append(mustRefRecord(t, "refs/heads/main", obj("aa")))
+	l.Append(mustRefRecord(t, "refs/heads/main", obj("bb")))
+	l.Append(mustRefRecord(t, "refs/heads/main", obj("cc")))
+
+	v, err := l.Checkpointed(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Size() != 2 {
+		t.Errorf("view Size() = %d, want 2", v.Size())
+	}
+
+	records, err := v.RefRecords("refs/heads/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("view returned %d records, want 2", len(records))
+	}
+	if last := records[len(records)-1].Object; last != obj("bb") {
+		t.Errorf("latest witnessed record = %s, want %s", last, obj("bb"))
+	}
+
+	// The view's root is the tree the checkpoint of that size committed to,
+	// not the root over everything the ref happens to hold.
+	trimmed := mustOpen(t, dir)
+	trimmed.Append(mustRefRecord(t, "refs/heads/main", obj("aa")))
+	trimmed.Append(mustRefRecord(t, "refs/heads/main", obj("bb")))
+	if v.Root() != mustView(t, trimmed).Root() {
+		t.Error("view root should be the root of its own prefix")
+	}
+	if v.Root() == l.Root() {
+		t.Error("view root should differ from the root over unwitnessed entries")
+	}
+}
+
+// TestCheckpointedRejectsShortLog is the other direction: a checkpoint
+// committing to entries the log cannot produce means witnessed entries were
+// removed, which is not something to work around.
+func TestCheckpointedRejectsShortLog(t *testing.T) {
+	dir := initRepo(t)
+	l := mustOpen(t, dir)
+	l.Append(mustRefRecord(t, "refs/heads/main", obj("aa")))
+
+	if _, err := l.Checkpointed(2); err == nil {
+		t.Error("expected a checkpoint larger than the log to be rejected")
+	}
+	if _, err := l.Checkpointed(1); err != nil {
+		t.Errorf("a checkpoint matching the log should be accepted: %v", err)
+	}
+	if _, err := l.Checkpointed(0); err != nil {
+		t.Errorf("an empty view should be accepted: %v", err)
 	}
 }
