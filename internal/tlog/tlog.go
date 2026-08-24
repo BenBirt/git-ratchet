@@ -12,22 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package tlog provides the RFC 6962 Merkle tree used by git-ratchet's
-// transparency-log mode.
+// Package tlog builds the RFC 6962 Merkle tree behind git-ratchet's
+// transparency-log mode: leaf and root hashes, consistency proofs for
+// submission to a witness, and the tlog-checkpoint body committing to a tree.
 //
-// The tree itself comes from github.com/transparency-dev/merkle, maintained by
-// the authors of the transparency-log specifications this mode implements.
-// Consistency verification in particular is what a witness runs to decide
-// whether to cosign, so it is not somewhere to carry a bespoke implementation.
+// The tree comes from github.com/transparency-dev/merkle. This package adapts
+// it in two ways. It works in fixed-size [Hash] values rather than []byte, so
+// hashes compare and store naturally. And [nodeSource] resolves proof nodes
+// from the leaves in memory, because the library reports which nodes a proof
+// needs and leaves fetching them to the caller: it is built for logs whose
+// nodes live in tiled storage, and a git-ratchet log is held whole.
 //
-// This package is a thin adapter over that library, for two reasons:
-//
-//   - It works in fixed-size [Hash] values rather than []byte, which makes
-//     equality comparisons and struct fields natural for callers.
-//   - The library's proof generation reports which tree nodes a proof needs and
-//     leaves fetching them to the caller, because it is built for logs whose
-//     nodes live in tiled storage. git-ratchet logs are small and held whole in
-//     memory, so [nodeSource] resolves those nodes directly from the leaves.
+// Proofs are verified by whoever receives them. Witnesses are not run here.
 package tlog
 
 import (
@@ -114,21 +110,16 @@ func HashLeaf(data []byte) Hash {
 	return toHash(hasher.HashLeaf(data))
 }
 
-// HashChildren returns the interior node hash SHA-256(0x01 || left || right).
-func HashChildren(left, right Hash) Hash {
-	return toHash(hasher.HashChildren(left[:], right[:]))
-}
-
-// EmptyRoot is the Merkle tree hash of an empty log: SHA-256 of the empty
+// emptyRoot is the Merkle tree hash of an empty log: SHA-256 of the empty
 // string, per RFC 6962 section 2.1.
-func EmptyRoot() Hash {
+func emptyRoot() Hash {
 	return toHash(hasher.EmptyRoot())
 }
 
 // Root returns the Merkle tree hash of the given leaf hashes.
 func Root(leaves []Hash) Hash {
 	if len(leaves) == 0 {
-		return EmptyRoot()
+		return emptyRoot()
 	}
 	r := rangeFactory.NewEmptyRange(0)
 	for i := range leaves {
@@ -179,20 +170,6 @@ func (s nodeSource) fetch(nodes proof.Nodes) ([]Hash, error) {
 	return wrap(rehashed), nil
 }
 
-// InclusionProof returns the audit path for the leaf at index i in a tree of
-// the given leaves.
-func InclusionProof(leaves []Hash, i uint64) ([]Hash, error) {
-	n := Count(len(leaves))
-	if i >= n {
-		return nil, fmt.Errorf("leaf index %d out of range for tree of size %d", i, n)
-	}
-	nodes, err := proof.Inclusion(i, n)
-	if err != nil {
-		return nil, err
-	}
-	return nodeSource(leaves).fetch(nodes)
-}
-
 // ConsistencyProof returns the proof that a tree of size m is a prefix of a
 // tree of the given leaves.
 //
@@ -211,40 +188,4 @@ func ConsistencyProof(leaves []Hash, m uint64) ([]Hash, error) {
 		return nil, err
 	}
 	return nodeSource(leaves).fetch(nodes)
-}
-
-// VerifyInclusion checks that leafHash is the leaf at index i in a tree of
-// size n with the given root. It does not need the leaf list.
-func VerifyInclusion(leafHash, root Hash, p []Hash, i, n uint64) error {
-	if n == 0 {
-		return fmt.Errorf("invalid tree size %d", n)
-	}
-	if i >= n {
-		return fmt.Errorf("leaf index %d out of range for tree of size %d", i, n)
-	}
-	return proof.VerifyInclusion(hasher, i, n, leafHash[:], raw(p), root[:])
-}
-
-// RootFromInclusionProof recomputes the tree root implied by an inclusion
-// proof for the leaf at index i in a tree of size n.
-func RootFromInclusionProof(leafHash Hash, p []Hash, i, n uint64) (Hash, error) {
-	if n == 0 {
-		return Hash{}, fmt.Errorf("invalid tree size %d", n)
-	}
-	if i >= n {
-		return Hash{}, fmt.Errorf("leaf index %d out of range for tree of size %d", i, n)
-	}
-	root, err := proof.RootFromInclusionProof(hasher, i, n, leafHash[:], raw(p))
-	if err != nil {
-		return Hash{}, err
-	}
-	return toHash(root), nil
-}
-
-// VerifyConsistency checks that a tree of size m with root oldRoot is a prefix
-// of a tree of size n with root newRoot. It does not need the leaf list, so a
-// witness can verify an append-only transition knowing only what it stored and
-// what it is being asked to sign.
-func VerifyConsistency(oldRoot, newRoot Hash, p []Hash, m, n uint64) error {
-	return proof.VerifyConsistency(hasher, m, n, raw(p), oldRoot[:], newRoot[:])
 }
