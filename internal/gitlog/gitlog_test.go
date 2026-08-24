@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	flog "github.com/transparency-dev/formats/log"
 	mproof "github.com/transparency-dev/merkle/proof"
 	"github.com/transparency-dev/merkle/rfc6962"
 
@@ -345,5 +346,71 @@ func TestUnknownTypesAreSkipped(t *testing.T) {
 	}
 	if len(mains) != 1 {
 		t.Errorf("RefRecords(main) = %+v, want only the ref-record entry", mains)
+	}
+}
+
+// checkpointFor returns a checkpoint over the log's first size entries.
+func checkpointFor(t *testing.T, l *Log, size uint64) flog.Checkpoint {
+	t.Helper()
+	prefix := &Log{entries: l.entries[:size]}
+	root := prefix.Root()
+	return flog.Checkpoint{Size: size, Hash: root[:]}
+}
+
+// TestCheckpointedIgnoresUnwitnessedEntries covers the trust boundary: entries
+// past the checkpoint's size are in the ref but no witness attested to them,
+// and anyone who can push to the log ref can put them there.
+func TestCheckpointedIgnoresUnwitnessedEntries(t *testing.T) {
+	dir := initRepo(t)
+	l := mustOpen(t, dir)
+	l.Append(mustRefRecord(t, "refs/heads/main", obj("aa")))
+	l.Append(mustRefRecord(t, "refs/heads/main", obj("bb")))
+	l.Append(mustRefRecord(t, "refs/heads/main", obj("cc")))
+
+	witnessed, err := l.Checkpointed(checkpointFor(t, l, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if witnessed.Size() != 2 {
+		t.Errorf("Size() = %d, want 2", witnessed.Size())
+	}
+
+	records, err := witnessed.RefRecords("refs/heads/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("got %d records, want 2", len(records))
+	}
+	if last := records[len(records)-1].Object; last != obj("bb") {
+		t.Errorf("latest witnessed record = %s, want %s", last, obj("bb"))
+	}
+}
+
+// TestCheckpointedRejectsMismatchedCheckpoints covers the two ways the log on
+// disk can fail to be the one the checkpoint was signed over: it is too short
+// to hold the witnessed entries, or its entries hash to something else.
+func TestCheckpointedRejectsMismatchedCheckpoints(t *testing.T) {
+	dir := initRepo(t)
+	l := mustOpen(t, dir)
+	l.Append(mustRefRecord(t, "refs/heads/main", obj("aa")))
+	l.Append(mustRefRecord(t, "refs/heads/main", obj("bb")))
+
+	if _, err := l.Checkpointed(flog.Checkpoint{Size: 3, Hash: make([]byte, 32)}); err == nil {
+		t.Error("expected a checkpoint larger than the log to be rejected")
+	}
+
+	// The right size, but the root over a different prefix.
+	wrong := checkpointFor(t, l, 1)
+	wrong.Size = 2
+	if _, err := l.Checkpointed(wrong); err == nil {
+		t.Error("expected a checkpoint whose root does not match the prefix to be rejected")
+	}
+
+	if _, err := l.Checkpointed(checkpointFor(t, l, 2)); err != nil {
+		t.Errorf("a checkpoint matching the log should be accepted: %v", err)
+	}
+	if _, err := l.Checkpointed(checkpointFor(t, l, 0)); err != nil {
+		t.Errorf("an empty checkpoint should be accepted: %v", err)
 	}
 }
