@@ -34,6 +34,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/transparency-dev/formats/log"
 	"github.com/transparency-dev/tessera/api"
 	"github.com/transparency-dev/tessera/api/layout"
 
@@ -188,6 +189,30 @@ func (l *Log) Root() tlog.Hash {
 // Append adds an entry to the in-memory log. Call Save to persist it.
 func (l *Log) Append(e Entry) {
 	l.entries = append(l.entries, e)
+}
+
+// Checkpointed returns the log as a checkpoint describes it: the first cp.Size
+// entries, having confirmed they are the ones the checkpoint commits to.
+//
+// An entry is bytes in a Git tree until a cosigned checkpoint commits to it.
+// Anyone who can push to the log ref can append, so entries beyond cp.Size are
+// dropped: no witness attested to them, and they are evidence of nothing. A log
+// holding fewer entries than the checkpoint claims is the opposite case and an
+// error, because entries a quorum did attest to have gone missing, as is a
+// prefix whose root hash is not the one signed.
+func (l *Log) Checkpointed(cp log.Checkpoint) (*Log, error) {
+	if cp.Size > l.Size() {
+		return nil, fmt.Errorf("checkpoint commits to %d entries but the log holds %d", cp.Size, l.Size())
+	}
+	root, err := tlog.RootFromBytes(cp.Hash)
+	if err != nil {
+		return nil, fmt.Errorf("checkpoint root hash: %w", err)
+	}
+	trimmed := &Log{repoDir: l.repoDir, head: l.head, checkpoint: l.checkpoint, entries: l.entries[:cp.Size]}
+	if trimmed.Root() != root {
+		return nil, fmt.Errorf("the log's first %d entries do not reproduce the checkpoint's root hash", cp.Size)
+	}
+	return trimmed, nil
 }
 
 // RefRecords returns the decoded ref-record entries naming a ref, in log
