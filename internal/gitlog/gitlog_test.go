@@ -22,6 +22,9 @@ import (
 	"strings"
 	"testing"
 
+	mproof "github.com/transparency-dev/merkle/proof"
+	"github.com/transparency-dev/merkle/rfc6962"
+
 	"github.com/project-oak/git-ratchet/internal/tlog"
 )
 
@@ -93,7 +96,7 @@ func TestOpenEmptyRepo(t *testing.T) {
 	if l.StoredCheckpoint() != "" {
 		t.Errorf("StoredCheckpoint() = %q, want empty", l.StoredCheckpoint())
 	}
-	if l.Root() != tlog.EmptyRoot() {
+	if l.Root() != tlog.Root(nil) {
 		t.Error("an empty log should have the empty tree root")
 	}
 }
@@ -292,13 +295,21 @@ func TestProofsAgainstStoredLog(t *testing.T) {
 	reopened := mustOpen(t, dir)
 	root := reopened.Root()
 
-	for m := uint64(0); m <= 20; m++ {
-		proof, err := reopened.ConsistencyProofFrom(m)
+	// Verified with the merkle library's own verifier: what is under test is
+	// that a log round-tripped through Git yields the leaves the proof is
+	// generated from. m starts at 1 because a proof from the empty tree has
+	// nothing to prove.
+	for m := uint64(1); m <= 20; m++ {
+		p, err := reopened.ConsistencyProofFrom(m)
 		if err != nil {
 			t.Fatalf("ConsistencyProofFrom(%d): %v", m, err)
 		}
 		oldRoot := tlog.Root(reopened.leafHashes()[:m])
-		if err := tlog.VerifyConsistency(oldRoot, root, proof, m, 20); err != nil {
+		raw := make([][]byte, 0, len(p))
+		for _, h := range p {
+			raw = append(raw, h[:])
+		}
+		if err := mproof.VerifyConsistency(rfc6962.DefaultHasher, m, 20, raw, oldRoot[:], root[:]); err != nil {
 			t.Errorf("VerifyConsistency(%d): %v", m, err)
 		}
 	}

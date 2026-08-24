@@ -37,4 +37,5 @@ go_test(
         "tlog_test.go",
     ],
     embed = [":tlog"],
+    deps = ["@com_github_transparency_dev_merkle//proof"],
 )
