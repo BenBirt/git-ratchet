@@ -100,9 +100,8 @@ already carry timestamps from parties that are not the origin.
 
 #### Canonical encoding
 
-The Merkle leaf hash of an entry is `SHA-256(0x00 || <entry bytes>)`, per
-[RFC 6962][] section 2.1, over the entry's bytes exactly as stored — the
-bundle's length prefix is framing and is not hashed.
+Leaf hashes are [RFC 6962][]'s, over the entry's bytes exactly as stored; the
+bundle framing is not hashed.
 
 The grammar admits exactly one byte string per statement, so the same statement
 always produces the same leaf. Implementations MUST reject an entry that
@@ -115,35 +114,35 @@ deviates from it:
 - hex is lowercase;
 - the type line is non-empty and contains no whitespace.
 
-Being tolerant here would defeat the point of the format. Two encoders that
-disagree about, say, whether a trailing space is permitted would produce
-different bytes for the same statement, and therefore different leaves.
+Two encoders that disagreed about, say, a trailing space would produce
+different leaves for the same statement.
 
 [RFC 6962]: https://www.rfc-editor.org/rfc/rfc6962.html
 
 ### Evolution
 
-The version is part of the type identifier — `ref-record/v1` is one string, not
-a name and a version field — and there is no second version for the framing. A
-change in what a statement means produces a new type identifier. The framing
-itself, first line names the type and the rest is its payload, is thin enough
-that a change to it can be announced the same way.
+The version is part of the type identifier: `ref-record/v1` is one string, not
+a name and a version field. A change in what a statement means produces a new
+type identifier.
 
 **Entries of an unrecognised type are skipped.** An implementation reading a
 type it does not know ignores that entry and carries on.
 
-This is safe because verification does not merely read the log: it reconciles
-the log against the repository. An implementation that skips entries has an
-idea of the latest logged state that lags the real ref, and a ref ahead of the
-log is already a failure. Skipping cannot turn a bad repository into a good
-verdict for any statement that records state.
+Skipping is safe in one direction only, and that direction is the one that
+matters. Verification does not merely read the log; it reconciles the log
+against the repository. An implementation that skips entries has an idea of the
+latest logged state that lags the real ref, and a ref ahead of the log is
+already a failure. So skipping can make verification fail where a newer
+implementation would have passed, but it cannot make it pass where a newer one
+would have failed.
 
-It would not be safe for a statement that *withdrew* something previously
-recorded — skipping that would turn a revocation into silence. Such a statement
-cannot be added compatibly later, because every existing implementation would
-already skip it. No marker is reserved for one. That is a deliberate trade: the
-cost of complicating the format now was judged higher than the likelihood of
-ever needing it.
+New types may therefore only ever *widen* the set of ref-to-commit mappings a
+verifier accepts, never narrow it. A type that withdrew something previously
+recorded — a revocation — widens the set, so it can be added later: an
+implementation predating it fails closed on the repository that used it, and
+the relying party upgrades. A type that narrowed the set could not be added
+this way, because implementations predating it would skip it and accept what it
+was meant to rule out.
 
 #### Worked example: tombstones
 
@@ -239,11 +238,10 @@ This implementation does not write them, and recomputes the tree from the
 entries instead.
 
 Hash tiles exist so that a client holding none of the log can verify a proof
-against it. Every consumer of a git-ratchet log holds all of it — the log
-arrives with the repository — and the witness is sent its consistency proof in
-the request and needs no tiles either. Nothing in this design reads them.
-Emitting hash tiles would be a small addition if a third-party tlog-tiles
-client ever wanted to consume the log directly.
+against it. Every consumer of a git-ratchet log holds all of it, since the log
+is contained by the repository, and the witness is sent its consistency proof
+in the request. Emitting them would be a small addition if a third-party
+tlog-tiles client wanted to consume the log directly.
 
 ## Policy
 
