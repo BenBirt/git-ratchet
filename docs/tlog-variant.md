@@ -128,9 +128,8 @@ type identifier.
 **Entries of an unrecognised type are skipped.** An implementation reading a
 type it does not know ignores that entry and carries on.
 
-Skipping is safe in one direction only, and that direction is the one that
-matters. Verification does not merely read the log; it reconciles the log
-against the repository. An implementation that skips entries has an idea of the
+Skipping is safe in one direction only. Verification does not just read the
+log; it reconciles the log against the repository. An implementation that skips entries has an idea of the
 latest logged state that lags the real ref, and a ref ahead of the log is
 already a failure. So skipping can make verification fail where a newer
 implementation would have passed, but it cannot make it pass where a newer one
@@ -222,7 +221,7 @@ Bundle paths and encoding are [tlog-tiles][]'s, via the reference
 implementation in `tessera/api`, so a tlog-tiles client can read these bundles
 directly. Entries are opaque byte strings of at most 65535 bytes.
 
-Two practical notes. The bundle framing contains NUL bytes, so Git treats
+Two practical consequences. The bundle framing contains NUL bytes, so Git treats
 bundle blobs as binary: `git log -p` on the log ref reports "Binary files
 differ" rather than showing added entries, though `git cat-file -p` prints them
 and the entries themselves are plain text. And storing the log as a commit
@@ -430,19 +429,16 @@ commits to cannot reproduce the tree a quorum signed, which means witnessed
 entries were removed.
 
 Verification reads only the refs it was asked about. A log ref carrying
-unwitnessed entries is not reported, because it is not an answer to the
-question that was asked.
+unwitnessed entries is not reported.
 
-Step 3 is the ratchet, and it is the whole of it. It replaces what the witness
-does in `git-checkpoint` mode, it is the only check in this mode that an
-attacker cannot decline to run, and it is always performed — there is no
-cheaper verification path, because a cheaper one would not be safe. In
-particular it MUST NOT be skipped on the grounds that `log` or `checkpoint`
-already applied the same rule: a verifier has no way to know they were ever
-run, and an attacker writing to the log ref would not have run them.
+Step 3 is the ratchet. It replaces what the witness does in `git-checkpoint`
+mode, and it is always performed. It MUST NOT be skipped on the grounds that
+`log` or `checkpoint` already applied the same rule: a verifier cannot know
+whether they ran, and an attacker writing to the log ref would not have run
+them.
 
-The walk is inexpensive despite doing more work than `git-checkpoint` mode's
-`verify`. The log and the commit objects are in the same repository, so it is a
+The walk does more work than `git-checkpoint` mode's `verify` but is still
+cheap. The log and the commit objects are in the same repository, so it is a
 sequence of local `git merge-base --is-ancestor` calls with nothing to fetch.
 
 If a logged commit is missing from the object database — because a rollback was
@@ -498,18 +494,18 @@ losing witness cosignatures.
 
 ## Implementation
 
-The Merkle tree comes from [`github.com/transparency-dev/merkle`][merkle], maintained
-by the authors of the transparency-log specifications this mode implements.
-Consistency verification is what a witness runs to decide whether to cosign, so
-it is not somewhere to carry a bespoke implementation.
+The Merkle tree comes from [`github.com/transparency-dev/merkle`][merkle],
+maintained by the authors of the transparency-log specifications this mode
+implements. Consistency verification is what a witness runs to decide whether
+to cosign, so a bespoke implementation of it would be a poor trade.
 
 [Tessera][] was considered and not used. Tessera is a log *server* framework —
 batching, sequencing, antispam, and storage drivers for GCS, S3, MySQL and
 POSIX — and importing its core links 70 non-standard-library packages, against
 3 for `merkle/proof`. git-ratchet appends at most one entry per ref per push,
-from a
-CLI, into a Git ref. Almost none of that machinery applies, and adopting it
-would mean writing a storage driver whose unit of work is rewriting a Git tree.
+from a CLI, into a Git ref. Almost none of that machinery applies, and adopting
+it would mean writing a storage driver whose unit of work is rewriting a Git
+tree.
 
 Entry bundle paths and decoding come from `tessera/api` and `tessera/api/layout`
 — 2 packages with no external dependencies, and separable from the Tessera
