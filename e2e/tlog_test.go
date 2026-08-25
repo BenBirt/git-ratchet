@@ -45,6 +45,7 @@ type tlogFixture struct {
 	witnessKey *inote.Signer
 	originKey  *inote.Signer
 	witnessURL string
+	cosignBin  string
 }
 
 func newTlogFixture(t *testing.T) *tlogFixture {
@@ -60,6 +61,7 @@ func newTlogFixture(t *testing.T) *tlogFixture {
 	tmpDir := t.TempDir()
 	f.keyPath = writeKeyFile(t, tmpDir, f.originKey)
 
+	f.cosignBin = mustFindCosignBinary(t)
 	f.witnessURL = startTlogWitness(t, f.originKey, f.witnessKey)
 	f.policyPath = writeTlogPolicyFile(t, f.repoDir, f.originKey, f.witnessKey, f.witnessURL)
 	return f
@@ -514,4 +516,98 @@ func TestTlogUnwitnessedEntriesAreIgnored(t *testing.T) {
 	if out, err := f.verify(t, "refs/heads/main"); err != nil {
 		t.Fatalf("verify should accept a ref inside the witnessed prefix: %v\n%s", err, out)
 	}
+}
+
+// TestTlogDecomposedWorkflow exercises the transport the GitHub Issue witness
+// uses: the add-checkpoint body travels as a file rather than as a POST.
+//
+// checkpoint-request writes the request and the note without contacting anyone
+// and without touching the log; the witness runs from those files; and
+// checkpoint-store checks the cosignatures cover the tree the log holds, and
+// saves. The result must verify like any other checkpoint, because it is one —
+// only the delivery differs.
+func TestTlogDecomposedWorkflow(t *testing.T) {
+	f := newTlogFixture(t)
+	dir := t.TempDir()
+
+	witnessKeyPath := filepath.Join(dir, "witness.key")
+	mustWriteKey(t, witnessKeyPath, f.witnessKey)
+	originsPath := filepath.Join(dir, "origins.txt")
+	if err := os.WriteFile(originsPath, []byte(f.originKey.VKey()+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(dir, "witness-state.txt")
+
+	round := func(t *testing.T, n int) {
+		t.Helper()
+		requestPath := filepath.Join(dir, fmt.Sprintf("request-%d", n))
+		notePath := filepath.Join(dir, fmt.Sprintf("note-%d", n))
+		cosigPath := filepath.Join(dir, fmt.Sprintf("cosig-%d", n))
+
+		f.mustLogRefs(t, "refs/heads/main")
+		logHead := strings.TrimSpace(runOutput(t, f.repoDir, "git", "rev-parse", "refs/ratchet/log"))
+
+		if out, err := exec.Command(f.ratchetBin, "checkpoint-request",
+			"--mode", "tlog", "--repo", f.repoDir,
+			"--key", f.keyPath,
+			"--output-request", requestPath, "--output-note", notePath,
+		).CombinedOutput(); err != nil {
+			t.Fatalf("checkpoint-request: %v\n%s", err, out)
+		}
+
+		// checkpoint-request only reads: the checkpoint the log carries does
+		// not change until the cosignatures are in hand.
+		if now := strings.TrimSpace(runOutput(t, f.repoDir, "git", "rev-parse", "refs/ratchet/log")); now != logHead {
+			t.Fatalf("checkpoint-request moved the log ref: %s -> %s", logHead, now)
+		}
+
+		cosig, err := exec.Command(f.cosignBin,
+			"--mode", "tlog", "--request", requestPath, "--origin-vkeys", originsPath,
+			"--key", witnessKeyPath, "--stored-checkpoint", statePath,
+		).Output()
+		if err != nil {
+			t.Fatalf("cosign round %d: %v", n, err)
+		}
+		if err := os.WriteFile(cosigPath, cosig, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		if out, err := exec.Command(f.ratchetBin, "checkpoint-store",
+			"--mode", "tlog", "--repo", f.repoDir,
+			"--policy", f.policyPath, "--note", notePath, "--cosig", cosigPath,
+		).CombinedOutput(); err != nil {
+			t.Fatalf("checkpoint-store round %d: %v\n%s", n, err, out)
+		}
+
+		if out, err := f.verify(t, "refs/heads/main"); err != nil {
+			t.Fatalf("verify after round %d: %v\n%s", n, err, out)
+		}
+	}
+
+	makeCommit(t, f.repoDir, "first commit")
+	round(t, 1)
+
+	// A second round proves the witness ratcheted: it has to accept a
+	// consistency proof from the size it stored in round one.
+	makeCommit(t, f.repoDir, "second commit")
+	round(t, 2)
+}
+
+// mustFindCosignBinary locates the compiled cosign binary from Bazel runfiles.
+func mustFindCosignBinary(t *testing.T) string {
+	t.Helper()
+	if srcDir := os.Getenv("TEST_SRCDIR"); srcDir != "" {
+		for _, ws := range []string{"_main", "__main__"} {
+			for _, p := range []string{
+				filepath.Join(srcDir, ws, "witness", "cosign", "cosign_", "cosign"),
+				filepath.Join(srcDir, ws, "witness", "cosign", "cosign"),
+			} {
+				if _, err := os.Stat(p); err == nil {
+					return p
+				}
+			}
+		}
+	}
+	t.Skip("cosign binary not found; run with: bazel test //e2e:e2e_test")
+	return ""
 }
