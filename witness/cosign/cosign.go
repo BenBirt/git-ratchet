@@ -27,6 +27,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 
 	"flag"
 	"fmt"
@@ -44,6 +45,7 @@ var (
 	originVKeysPath      = flag.String("origin-vkeys", "", "Path to file containing trusted origin vkeys (one per line)")
 	storedCheckpointPath = flag.String("stored-checkpoint", "", "Path to existing cosigned checkpoint file (optional)")
 	keyPath              = flag.String("key", "", "Path to witness private key file (required)")
+	modeFlag             = flag.String("mode", "git-checkpoint", "Checkpoint format to witness: git-checkpoint or tlog")
 )
 
 func main() {
@@ -87,6 +89,23 @@ func main() {
 		os.Exit(1)
 	}
 	bodyStr := string(bodyBytes)
+
+	// tlog mode is the same protocol an HTTP witness serves, carried as a file
+	// instead of a POST. The witness itself comes from transparency-dev.
+	switch *modeFlag {
+	case "tlog":
+		cosigLine, err := cosignTlog(context.Background(), bodyStr, witnessSigner, trustedOrigins, *storedCheckpointPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(cosigLine)
+		return
+	case "git-checkpoint":
+	default:
+		fmt.Fprintf(os.Stderr, "error: --mode must be git-checkpoint or tlog, got %q\n", *modeFlag)
+		os.Exit(1)
+	}
 
 	// Step 1: Parse the request into ancestry proof and signed note.
 	ancestry, signedNote, err := iwitness.ParseAddCheckpointRequest(bodyStr)
@@ -181,6 +200,9 @@ func main() {
 
 // cosignOriginKey holds a trusted origin's public key and signature type.
 type cosignOriginKey struct {
+	// vkey is the line as it appeared in the file. tlog mode hands it to
+	// transparency-dev/witness, which builds its own verifier from it.
+	vkey    string
 	pub     interface{} // crypto.PublicKey
 	sigType note.SigType
 }
@@ -205,7 +227,7 @@ func readTrustedOriginsFile(path string) (map[string]cosignOriginKey, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parsing vkey %q: %w", line, err)
 		}
-		res[name] = cosignOriginKey{pub: pub, sigType: sigType}
+		res[name] = cosignOriginKey{vkey: line, pub: pub, sigType: sigType}
 	}
 	return res, scanner.Err()
 }

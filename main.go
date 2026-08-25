@@ -372,6 +372,7 @@ type checkpointRequestCmd struct {
 	repoDir       string
 	outputRequest string
 	outputNote    string
+	mode          string
 }
 
 func (*checkpointRequestCmd) Name() string { return "checkpoint-request" }
@@ -395,21 +396,26 @@ func (c *checkpointRequestCmd) SetFlags(f *flag.FlagSet) {
 	f.StringVar(&c.repoDir, "repo", ".", "Path to git repository")
 	f.StringVar(&c.outputRequest, "output-request", "", "Write the full add-checkpoint wire format to this file (required)")
 	f.StringVar(&c.outputNote, "output-note", "", "Write just the signed note to this file (required)")
+	f.StringVar(&c.mode, "mode", modeGitCheckpoint, "Checkpoint format: "+modeGitCheckpoint+" or "+modeTlog)
 }
 
 func (c *checkpointRequestCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...any) subcommands.ExitStatus {
-	if c.ref == "" || c.outputRequest == "" || c.outputNote == "" || (c.keyPath == "" && c.kmsKey == "") {
-		fmt.Fprintln(os.Stderr, "error: --ref, --output-request, --output-note, and one of --key or --kms-key are required")
+	if err := validateMode(c.mode); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return subcommands.ExitUsageError
+	}
+	if err := checkpointRefFlag(c.mode, c.ref); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		fmt.Fprint(os.Stderr, c.Usage())
+		return subcommands.ExitUsageError
+	}
+	if c.outputRequest == "" || c.outputNote == "" || (c.keyPath == "" && c.kmsKey == "") {
+		fmt.Fprintln(os.Stderr, "error: --output-request, --output-note, and one of --key or --kms-key are required")
 		fmt.Fprint(os.Stderr, c.Usage())
 		return subcommands.ExitUsageError
 	}
 	if c.keyPath != "" && c.kmsKey != "" {
 		fmt.Fprintln(os.Stderr, "error: --key and --kms-key are mutually exclusive")
-		return subcommands.ExitUsageError
-	}
-
-	if _, err := gitutil.ParseRefKind(c.ref); err != nil {
-		fmt.Fprintf(os.Stderr, "error: invalid --ref: %v\n", err)
 		return subcommands.ExitUsageError
 	}
 
@@ -435,6 +441,19 @@ func (c *checkpointRequestCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...
 	origin := c.origin
 	if origin == "" {
 		origin = signer.Name
+	}
+
+	if c.mode == modeTlog {
+		request, signed, err := checkpointRequestTlog(c.repoDir, origin, signer)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			return subcommands.ExitFailure
+		}
+		if err := writeRequestFiles(c.outputRequest, request, c.outputNote, signed); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			return subcommands.ExitFailure
+		}
+		return subcommands.ExitSuccess
 	}
 
 	// Build the signed checkpoint note and ancestry proof.
@@ -480,6 +499,7 @@ type checkpointStoreCmd struct {
 	notePath   string
 	cosigPaths stringSlice
 	repoDir    string
+	mode       string
 }
 
 func (*checkpointStoreCmd) Name() string { return "checkpoint-store" }
@@ -506,17 +526,22 @@ func (c *checkpointStoreCmd) SetFlags(f *flag.FlagSet) {
 	f.StringVar(&c.notePath, "note", "", "Path to the signed note file (required)")
 	f.Var(&c.cosigPaths, "cosig", "Path to a cosignature file (repeatable)")
 	f.StringVar(&c.repoDir, "repo", ".", "Path to git repository")
+	f.StringVar(&c.mode, "mode", modeGitCheckpoint, "Checkpoint format: "+modeGitCheckpoint+" or "+modeTlog)
 }
 
 func (c *checkpointStoreCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...any) subcommands.ExitStatus {
-	if c.ref == "" || c.policyPath == "" || c.notePath == "" {
-		fmt.Fprintln(os.Stderr, "error: --ref, --policy, and --note are required")
+	if err := validateMode(c.mode); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return subcommands.ExitUsageError
+	}
+	if err := checkpointRefFlag(c.mode, c.ref); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		fmt.Fprint(os.Stderr, c.Usage())
 		return subcommands.ExitUsageError
 	}
-
-	if _, err := gitutil.ParseRefKind(c.ref); err != nil {
-		fmt.Fprintf(os.Stderr, "error: invalid --ref: %v\n", err)
+	if c.policyPath == "" || c.notePath == "" {
+		fmt.Fprintln(os.Stderr, "error: --policy and --note are required")
+		fmt.Fprint(os.Stderr, c.Usage())
 		return subcommands.ExitUsageError
 	}
 
@@ -537,6 +562,23 @@ func (c *checkpointStoreCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...an
 			return subcommands.ExitFailure
 		}
 		cosigLines = append(cosigLines, strings.TrimSpace(string(cosigData)))
+	}
+
+	if c.mode == modeTlog {
+		assembled := signed
+		for _, line := range cosigLines {
+			assembled = note.AppendSignature(assembled, line)
+		}
+		tpol, err := policy.FromPath(c.policyPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: loading policy: %v\n", err)
+			return subcommands.ExitFailure
+		}
+		if err := checkpointStoreTlog(c.repoDir, assembled, tpol); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			return subcommands.ExitFailure
+		}
+		return subcommands.ExitSuccess
 	}
 
 	// Load the policy.

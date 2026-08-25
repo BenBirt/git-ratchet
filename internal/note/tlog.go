@@ -59,6 +59,15 @@ func skeyForFormats(s *Signer) (string, error) {
 		s.Name, binary.BigEndian.Uint32(s.hash[:]), base64.StdEncoding.EncodeToString(key)), nil
 }
 
+// TlogCosigner returns a signer that cosigns tlog-checkpoints with this key,
+// for handing to a witness implementation that takes note signers.
+func TlogCosigner(s *Signer) (sumdbnote.Signer, error) {
+	if s.Role != RoleCosigner {
+		return nil, fmt.Errorf("TlogCosigner requires a cosigner key, got origin")
+	}
+	return tlogSigner(s)
+}
+
 // tlogSigner returns a formats signer for the given key. It signs a
 // tlog-checkpoint note body according to the key's algorithm: a plain note
 // signature for 0x01, and the timestamped cosigned_message for 0x04 and 0x06.

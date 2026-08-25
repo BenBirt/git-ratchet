@@ -32,6 +32,7 @@ import (
 	"github.com/project-oak/git-ratchet/internal/gitutil"
 	"github.com/project-oak/git-ratchet/internal/note"
 	"github.com/project-oak/git-ratchet/internal/tlog"
+	iwitness "github.com/project-oak/git-ratchet/internal/witness"
 )
 
 // Checkpoint format modes. See docs/tlog-variant.md for how they differ.
@@ -419,6 +420,68 @@ func checkLogChains(repoDir string, l *gitlog.Log) error {
 			return err
 		}
 	}
+	return nil
+}
+
+// checkpointRequestTlog builds the add-checkpoint request a witness needs,
+// without contacting one and without writing to the log.
+//
+// It describes the log as it stands. Nothing durable changes here, so a log
+// entry landing before checkpointStoreTlog runs invalidates the request rather
+// than corrupting anything; that command says so and the request is rebuilt.
+func checkpointRequestTlog(repoDir, origin string, signer *note.Signer) (request, signedNote string, err error) {
+	l, oldSize, err := logToCheckpoint(repoDir)
+	if err != nil {
+		return "", "", err
+	}
+
+	cp := tlog.NewCheckpoint(origin, l.Size(), l.Root())
+	signedNote, err = note.SignTlogCheckpoint(string(cp.Marshal()), signer)
+	if err != nil {
+		return "", "", fmt.Errorf("signing checkpoint: %w", err)
+	}
+
+	proof, err := l.ConsistencyProofFrom(oldSize)
+	if err != nil {
+		return "", "", fmt.Errorf("generating consistency proof from size %d: %w", oldSize, err)
+	}
+	return iwitness.FormatTlogRequest(oldSize, proof, signedNote), signedNote, nil
+}
+
+// checkpointStoreTlog stores a checkpoint assembled elsewhere, after checking
+// that the cosignatures cover the tree the log currently holds.
+func checkpointStoreTlog(repoDir, assembled string, pol *fpolicy.TLogPolicy) error {
+	if _, err := pol.Verify([]byte(assembled)); err != nil {
+		return fmt.Errorf("checkpoint rejected by policy: %w", err)
+	}
+
+	body, err := note.ExtractBody(assembled)
+	if err != nil {
+		return fmt.Errorf("parsing checkpoint: %w", err)
+	}
+	cp, cpRoot, err := tlog.ParseCheckpoint(body)
+	if err != nil {
+		return fmt.Errorf("malformed checkpoint: %w", err)
+	}
+
+	l, err := gitlog.Open(repoDir)
+	if err != nil {
+		return fmt.Errorf("opening log: %w", err)
+	}
+	// The cosignatures are over a tree, so the only way to know they apply to
+	// what is about to be written is to rebuild that tree and compare. The
+	// chains are not rechecked here: that check exists to keep a broken one
+	// from being cosigned, and by now it has been.
+	if cp.Size != l.Size() || l.Root() != cpRoot {
+		return fmt.Errorf("checkpoint commits to a tree of size %d that this repository does not reproduce "+
+			"(the log holds %d entries); the log may have grown since checkpoint-request, in which case "+
+			"rebuild the request", cp.Size, l.Size())
+	}
+
+	if err := l.Save(assembled, checkpointMessage(l)); err != nil {
+		return err
+	}
+	fmt.Printf("checkpoint stored at %s (log size %d)\n", gitlog.LogRef, l.Size())
 	return nil
 }
 
