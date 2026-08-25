@@ -94,9 +94,9 @@ Entries record **state, not transitions**. An entry does not name the ref's
 previous value. The log's ordering already establishes it, and a self-asserted
 predecessor would be a field that verification must not trust anyway.
 
-There is deliberately no timestamp. The origin chooses entry contents, so an
-origin-supplied time is an assertion nobody can check; the witness cosignatures
-already carry timestamps from parties that are not the origin.
+There is no timestamp. The origin chooses entry contents, so an
+origin-supplied time is an assertion nobody can check, and the witness
+cosignatures already carry timestamps from parties that are not the origin.
 
 #### Canonical encoding
 
@@ -186,9 +186,9 @@ from the origin's [signed-note][] verifier key. The size is the number of
 entries. The root hash is the RFC 6962 Merkle tree hash over all entry leaf
 hashes.
 
-Note what is *not* here: no ref path, no Git object hash, no Git-specific field
-of any kind. That is what makes the checkpoint cosignable by a witness that has
-never heard of git-ratchet.
+There is no ref path, no Git object hash, and no other Git-specific field,
+which is what makes the checkpoint cosignable by a witness that has never heard
+of git-ratchet.
 
 Witnesses append [tlog-cosignature][] lines.
 
@@ -278,13 +278,12 @@ depends on that.
 `tlog` mode is a [tlog-witness][] *client*. It submits `add-checkpoint` requests
 and collects [cosignatures][tlog-cosignature]; it does not implement a witness.
 
-That is the point of this mode. A `tlog-checkpoint` names an origin, a tree size
-and a root hash and nothing else, so any witness on the existing network can
-cosign one without knowing what a Git ref is — where a `git-checkpoint` needs a
-witness that understands commit ancestry, which is why `git-checkpoint` mode
-ships one. A checkpoint here also carries nothing repository-specific, so a
-private repository can use public witnesses without disclosing anything about
-its contents.
+A `tlog-checkpoint` names an origin, a tree size and a root hash and nothing
+else, so any witness on the existing network can cosign one without knowing
+what a Git ref is. A `git-checkpoint` needs a witness that understands commit
+ancestry, which is why `git-checkpoint` mode provides one. A checkpoint here
+also carries nothing repository-specific, so a private repository can use
+public witnesses without disclosing anything about its contents.
 
 The client is [transparency-dev/witness][witness-impl]'s, and the tests run
 against that project's witness implementation. Both halves being ours would let
@@ -329,14 +328,14 @@ is established.
 ## Logging and checkpointing
 
 Growing the log and checkpointing it are separate commands, as they are for any
-transparency log. `log` records ref states; `checkpoint` gets whatever the log
-holds cosigned.
+transparency log. `log` records ref states. `checkpoint` commits, with
+witnesses, to the current contents of the log.
 
-They differ in almost every respect. `log` is local, needs no key and contacts
-nobody; `checkpoint` needs the origin key and a quorum of witnesses over the
-network. `log` is per-ref and can take several at once; `checkpoint` is
-per-log. A failure to reach a witness leaves logged entries where they are, to
-be covered by the next checkpoint, rather than discarding them.
+`log` is local, needs no key and contacts nobody; `checkpoint` needs the origin
+key and a quorum of witnesses over the network. `log` takes any number of refs;
+`checkpoint` takes none, covering the whole log. A failure to reach a witness
+leaves logged entries where they are, to be covered by the next checkpoint,
+rather than discarding them.
 
 `git-ratchet log --mode tlog --ref R...` performs, in order:
 
@@ -358,42 +357,36 @@ be covered by the next checkpoint, rather than discarding them.
 
 ### The chain walks here are not security controls
 
-Both commands walk the chain, and neither walk defends against an attacker.
-They exist to stop an operator destroying their own ref by accident. This
-section is easy to misread, so it is worth being blunt about:
+Neither walk defends against an attacker. They stop an operator destroying
+their own ref by accident. An attacker who can write to `refs/ratchet/log`
+pushes entries straight to the ref and never runs either command; removing both
+walks would not change what the mode guarantees. That comes from
+[Verification](#verification).
 
-**Every security property of this mode comes from `verify`, and from nothing
-else.** See [Verification](#verification). An attacker who can write to
-`refs/ratchet/log` does not run `git-ratchet log`; they push whatever entries
-they like straight to the ref. Both walks are simply absent from that path, and
-removing them entirely would not weaken the mode's guarantees by one bit.
+A cosigned entry cannot be taken back: it is in the prefix of every later
+checkpoint, verification walks a ref's entries from the start, and no statement
+withdraws one. An entry that breaks the chain makes its ref unverifiable
+permanently — new origin key, history restarts. The ordinary way to produce one
+is not an attack: it is someone force-pushing a branch and then running `log`.
 
-What they buy is recovery from a mistake. A cosigned entry cannot be taken
-back: it is in the prefix of every later checkpoint, verification walks a ref's
-entries from the start, and no statement withdraws one. An entry that breaks
-the chain therefore makes its ref unverifiable permanently — new origin key,
-history restarts — and the ordinary way to produce one is not an attack at all.
-It is someone force-pushing a branch and then running `log` as usual.
-
-So the two walks are placed at the two points where the entry can still be
+The walks are therefore placed at the two points where the entry can still be
 withdrawn:
 
-- `log` walks before writing anything. The refusal costs nothing: the log ref
-  has not moved, so the branch can be put back and the run retried.
+- `log` walks before writing. The refusal costs nothing: the log ref has not
+  moved, so the branch can be put back and the run retried.
 - `checkpoint` walks again before seeking cosignatures, because entries can
   reach the log ref without going through `log` — a direct push, an older
   version of this tool, another implementation. An entry that has not been
   cosigned can still be dropped by resetting the log ref to its last
   checkpointed commit; one that has been cannot.
 
-Both walks cover every ref in the log rather than only the refs being recorded.
-A break in another ref's chain is already fatal for that ref; extending the log
+Both walks cover every ref in the log, not only the refs being recorded. A
+break in another ref's chain is already fatal for that ref; extending the log
 over it buries it deeper, and the operator running the tool today is the one in
 a position to notice.
 
-A conforming implementation MAY omit both walks. `verify` MUST NOT rely on
-them having happened: it applies the rule itself, over a log it assumes nobody
-checked.
+A conforming implementation MAY omit both walks. `verify` MUST NOT rely on them
+having happened.
 
 ## Verification
 
