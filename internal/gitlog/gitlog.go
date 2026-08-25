@@ -30,8 +30,10 @@ package gitlog
 import (
 	"encoding/binary"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/transparency-dev/formats/log"
@@ -213,6 +215,22 @@ func (l *Log) Checkpointed(cp log.Checkpoint) (*Log, error) {
 		return nil, fmt.Errorf("the log's first %d entries do not reproduce the checkpoint's root hash", cp.Size)
 	}
 	return trimmed, nil
+}
+
+// Refs returns the set of refs the log names, in no particular order.
+func (l *Log) Refs() ([]string, error) {
+	seen := map[string]bool{}
+	for i, e := range l.entries {
+		if e.Type != TypeRefRecord {
+			continue
+		}
+		rr, err := e.AsRefRecord()
+		if err != nil {
+			return nil, fmt.Errorf("log entry %d: %w", i, err)
+		}
+		seen[rr.Ref] = true
+	}
+	return slices.Collect(maps.Keys(seen)), nil
 }
 
 // RefRecords returns the decoded ref-record entries naming a ref, in log

@@ -50,9 +50,12 @@ go_test(
     srcs = [
         "checkpoint_request_test.go",
         "checkpoint_test.go",
+        "tlogcmd_test.go",
     ],
     data = [":git-ratchet"],  # keep
+    embed = [":git-ratchet_lib"],
     deps = [
+        "//internal/gitlog",
         "//internal/gitutil",
         "//internal/note",
     ],

@@ -243,44 +243,71 @@ func TestTlogLoggingUnchangedRefDoesNotGrowLog(t *testing.T) {
 	}
 }
 
-// TestTlogDetectsBranchRollback is the central test for this mode.
+// TestTlogLogRefusesRollback is the central test for this mode.
 //
-// The witness only attests that the log grew by appending, so it cosigns a
-// rollback quite happily — there is nothing in a consistency proof that says
-// anything about Git ancestry. The property is preserved because verify walks
-// the logged entries and finds that one does not descend from its predecessor.
-func TestTlogDetectsBranchRollback(t *testing.T) {
+// A witness cannot help here: it attests only that the log grew by appending,
+// and a consistency proof says nothing about Git ancestry, so it would cosign a
+// rollback quite happily. Nor can verify undo one, because a cosigned entry is
+// in the prefix of every later checkpoint for good. The rollback therefore has
+// to be refused before the entry is written, which also leaves the log ref
+// untouched so the branch can be put back.
+func TestTlogLogRefusesRollback(t *testing.T) {
 	f := newTlogFixture(t)
 
 	first := makeCommit(t, f.repoDir, "first commit")
 	makeCommit(t, f.repoDir, "second commit")
 	f.logAndCheckpoint(t, "refs/heads/main")
-	if out, err := f.verify(t, "refs/heads/main"); err != nil {
-		t.Fatalf("verify before rollback: %v\n%s", err, out)
-	}
+	logHead := strings.TrimSpace(runOutput(t, f.repoDir, "git", "rev-parse", "refs/ratchet/log"))
 
-	// Roll the branch back and log the rolled-back state.
 	run(t, f.repoDir, "git", "reset", "--hard", first)
 
-	f.mustLogRefs(t, "refs/heads/main")
-	out, err := f.checkpoint(t)
-	if err != nil {
-		t.Fatalf("the witness is expected to cosign a rollback in tlog mode, "+
-			"since appending to the log is consistent: %v\n%s", err, out)
+	out, err := f.logRefs(t, "refs/heads/main")
+	if err == nil {
+		t.Fatalf("log should refuse to record a rollback:\n%s", out)
+	}
+	if !strings.Contains(out, "refusing to log") || !strings.Contains(out, "history was rewritten") {
+		t.Errorf("expected a refusal naming the rewrite, got:\n%s", out)
 	}
 
-	verifyOut, err := f.verify(t, "refs/heads/main")
-	if err == nil {
-		t.Fatalf("verify should reject a logged rollback:\n%s", verifyOut)
-	}
-	if !strings.Contains(verifyOut, "history was rewritten") {
-		t.Errorf("expected a rewritten-history diagnostic, got:\n%s", verifyOut)
+	if now := strings.TrimSpace(runOutput(t, f.repoDir, "git", "rev-parse", "refs/ratchet/log")); now != logHead {
+		t.Errorf("log ref moved despite the refusal: %s -> %s", logHead, now)
 	}
 }
 
-// TestTlogDetectsTagMove checks the create-once rule for tags: a tag logged
-// twice is a moved tag, whatever it points at.
-func TestTlogDetectsTagMove(t *testing.T) {
+// TestTlogCheckpointRefusesUnverifiableChain covers the second place the chain
+// is checked. The log ref is written by git-ratchet log, but it is a Git ref
+// like any other and can be pushed to directly, so the chains are checked again
+// before a quorum is asked to cosign them. Here the break is not a bad entry
+// but a missing object: the branch was rolled back and collected after its tip
+// had been logged, so the ancestry the log asserts can no longer be shown.
+func TestTlogCheckpointRefusesUnverifiableChain(t *testing.T) {
+	f := newTlogFixture(t)
+
+	first := makeCommit(t, f.repoDir, "first commit")
+	f.logAndCheckpoint(t, "refs/heads/main")
+
+	makeCommit(t, f.repoDir, "second commit")
+	f.mustLogRefs(t, "refs/heads/main")
+
+	// The second commit is logged but not yet cosigned. Drop it from the
+	// repository, as a rollback followed by garbage collection would.
+	run(t, f.repoDir, "git", "reset", "--hard", first)
+	run(t, f.repoDir, "git", "reflog", "expire", "--expire=now", "--all")
+	run(t, f.repoDir, "git", "gc", "--prune=now")
+
+	out, err := f.checkpoint(t)
+	if err == nil {
+		t.Fatalf("checkpoint should refuse a chain it cannot check:\n%s", out)
+	}
+	if !strings.Contains(out, "refusing to checkpoint") || !strings.Contains(out, "missing from this clone") {
+		t.Errorf("expected a refusal naming the missing object, got:\n%s", out)
+	}
+}
+
+// TestTlogLogRefusesTagMove checks the create-once rule for tags: a tag logged
+// twice is a moved tag, whatever it points at, and logging it a second time
+// cannot be taken back.
+func TestTlogLogRefusesTagMove(t *testing.T) {
 	f := newTlogFixture(t)
 
 	makeCommit(t, f.repoDir, "first commit")
@@ -294,17 +321,18 @@ func TestTlogDetectsTagMove(t *testing.T) {
 	makeCommit(t, f.repoDir, "second commit")
 	run(t, f.repoDir, "git", "tag", "-f", "v1.0.0")
 
-	f.mustLogRefs(t, "refs/tags/v1.0.0")
-	if out, err := f.checkpoint(t); err != nil {
-		t.Fatalf("the witness is expected to cosign a moved tag in tlog mode: %v\n%s", err, out)
+	out, err := f.logRefs(t, "refs/tags/v1.0.0")
+	if err == nil {
+		t.Fatalf("log should refuse to record a tag twice:\n%s", out)
+	}
+	if !strings.Contains(out, "a tag must be logged at one object only") {
+		t.Errorf("expected a create-once diagnostic, got:\n%s", out)
 	}
 
-	verifyOut, err := f.verify(t, "refs/tags/v1.0.0")
-	if err == nil {
-		t.Fatalf("verify should reject a tag logged twice:\n%s", verifyOut)
-	}
-	if !strings.Contains(verifyOut, "a tag must be logged at one object only") {
-		t.Errorf("expected a create-once diagnostic, got:\n%s", verifyOut)
+	// The first entry still stands, so the tag at its logged object verifies.
+	run(t, f.repoDir, "git", "tag", "-f", "v1.0.0", "HEAD~1")
+	if out, err := f.verify(t, "refs/tags/v1.0.0"); err != nil {
+		t.Fatalf("verify should still pass for the tag as first logged: %v\n%s", err, out)
 	}
 }
 
