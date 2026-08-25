@@ -97,6 +97,10 @@ func logRefsTlog(repoDir string, refs []string) error {
 		return nil
 	}
 
+	if err := checkLogChains(repoDir, l); err != nil {
+		return fmt.Errorf("refusing to log: %w", err)
+	}
+
 	// The stored checkpoint is written back unchanged: it still describes the
 	// tree a quorum cosigned, which is now a prefix of what the log holds.
 	if err := l.Save(l.StoredCheckpoint(), "ratchet: log "+strings.Join(added, ", ")); err != nil {
@@ -249,22 +253,6 @@ func checkpointedLog(repoDir string, pol *fpolicy.TLogPolicy) (*gitlog.Log, erro
 	return l.Checkpointed(cp)
 }
 
-// dropRepeats collapses runs of entries naming the same object.
-//
-// Logging a ref that has not moved states nothing new, so a repeated entry is
-// not a second statement about the ref and must not be read as one. For a tag
-// that is the difference between a repeat and a move.
-func dropRepeats(entries []gitlog.RefRecord) []gitlog.RefRecord {
-	out := make([]gitlog.RefRecord, 0, len(entries))
-	for i, e := range entries {
-		if i > 0 && entries[i-1].Object == e.Object {
-			continue
-		}
-		out = append(out, e)
-	}
-	return out
-}
-
 // verifySingleRefTlog checks one ref against the verified log.
 //
 // Every ratchet property is established here, from entries held locally: a
@@ -287,31 +275,9 @@ func verifySingleRefTlog(repoDir, ref string, l *gitlog.Log) error {
 	if len(entries) == 0 {
 		return fmt.Errorf("no log entries for ref %q", ref)
 	}
-	entries = dropRepeats(entries)
 
-	switch kind {
-	case gitutil.RefTag:
-		// Tags are create-once. Repeats have been collapsed, so anything left
-		// beyond the first entry is the tag naming a second object.
-		if len(entries) > 1 {
-			return fmt.Errorf("tag moved: logged at %s and later at %s; a tag must be logged at one object only",
-				entries[0].Object, entries[1].Object)
-		}
-	case gitutil.RefBranch:
-		// Each logged state must descend from the one before it.
-		for i := 1; i < len(entries); i++ {
-			prev, curr := entries[i-1].Object, entries[i].Object
-			ok, err := gitutil.IsAncestor(repoDir, prev, curr)
-			if err != nil {
-				return fmt.Errorf("cannot check ancestry from logged commit %s to %s "+
-					"(the object may be missing from this clone, which is itself evidence "+
-					"that logged history was discarded): %w", prev, curr, err)
-			}
-			if !ok {
-				return fmt.Errorf("log entry %d for %s (%s) does not descend from entry %d (%s): history was rewritten",
-					i, ref, curr, i-1, prev)
-			}
-		}
+	if err := checkRefChain(repoDir, ref, kind, entries); err != nil {
+		return err
 	}
 
 	latest := entries[len(entries)-1]
@@ -377,6 +343,85 @@ func rawHashes(hs []tlog.Hash) [][]byte {
 	return out
 }
 
+// dropRepeats collapses runs of entries naming the same object.
+//
+// Logging a ref that has not moved states nothing new, so a repeated entry is
+// not a second statement about the ref and must not be read as one. For a tag
+// that is the difference between a repeat and a move.
+func dropRepeats(entries []gitlog.RefRecord) []gitlog.RefRecord {
+	out := make([]gitlog.RefRecord, 0, len(entries))
+	for i, e := range entries {
+		if i > 0 && entries[i-1].Object == e.Object {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// checkRefChain applies the ratchet rule to a ref's logged entries: a branch's
+// entries must each descend from the one before, and a tag must never move. It
+// says nothing about the repository's current ref.
+func checkRefChain(repoDir, ref string, kind gitutil.RefKind, entries []gitlog.RefRecord) error {
+	entries = dropRepeats(entries)
+	switch kind {
+	case gitutil.RefTag:
+		// Tags are create-once. Repeats have been collapsed, so anything left
+		// beyond the first entry is the tag naming a second object.
+		if len(entries) > 1 {
+			return fmt.Errorf("tag %s moved: logged at %s and later at %s; a tag must be logged at one object only",
+				ref, entries[0].Object, entries[1].Object)
+		}
+	case gitutil.RefBranch:
+		for i := 1; i < len(entries); i++ {
+			prev, curr := entries[i-1].Object, entries[i].Object
+			ok, err := gitutil.IsAncestor(repoDir, prev, curr)
+			if err != nil {
+				return fmt.Errorf("cannot check ancestry from logged commit %s to %s "+
+					"(the object may be missing from this clone, which is itself evidence "+
+					"that logged history was discarded): %w", prev, curr, err)
+			}
+			if !ok {
+				return fmt.Errorf("log entry %d for %s (%s) does not descend from entry %d (%s): history was rewritten",
+					i, ref, curr, i-1, prev)
+			}
+		}
+	}
+	return nil
+}
+
+// checkLogChains applies the ratchet rule to every ref the log names.
+//
+// A cosigned entry is permanent: every entry in a tree a quorum signed is in
+// the prefix of every later checkpoint, verification walks a ref's entries
+// from the start, and there is no statement that withdraws one. An entry that
+// breaks its ref's chain therefore makes that ref unverifiable for good, and
+// the usual way to produce one is not an attack but a force-push followed by
+// an ordinary `git-ratchet log` run.
+//
+// Callers run this at the two points where the entries can still be dropped:
+// before writing them, and before asking a quorum to cosign them.
+func checkLogChains(repoDir string, l *gitlog.Log) error {
+	refs, err := l.Refs()
+	if err != nil {
+		return err
+	}
+	for _, ref := range refs {
+		kind, err := gitutil.ParseRefKind(ref)
+		if err != nil {
+			return fmt.Errorf("log names an unrecognised ref %q: %w", ref, err)
+		}
+		entries, err := l.RefRecords(ref)
+		if err != nil {
+			return err
+		}
+		if err := checkRefChain(repoDir, ref, kind, entries); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // logToCheckpoint opens the log and returns it with the tree size the
 // witnesses are expected to be holding, which is the size of the checkpoint
 // this repository stored last. A witness that disagrees says so, and the
@@ -388,6 +433,14 @@ func logToCheckpoint(repoDir string) (*gitlog.Log, uint64, error) {
 	}
 	if l.Size() == 0 {
 		return nil, 0, fmt.Errorf("refusing to checkpoint an empty log (hint: git-ratchet log --mode %s --ref <ref>)", modeTlog)
+	}
+	// Entries reach the log ref by being pushed to it, not only through
+	// git-ratchet log, so the chains are checked again before a quorum is
+	// asked to cosign them. An entry that has been cosigned cannot be
+	// withdrawn; one that has not can still be dropped by resetting the log
+	// ref to its last checkpointed commit.
+	if err := checkLogChains(repoDir, l); err != nil {
+		return nil, 0, fmt.Errorf("refusing to checkpoint: %w", err)
 	}
 	oldSize, err := storedSize(l)
 	if err != nil {
