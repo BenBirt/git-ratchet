@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/google/subcommands"
+	"github.com/project-oak/git-ratchet/internal/gitlog"
 	"github.com/project-oak/git-ratchet/internal/gitutil"
 	"github.com/project-oak/git-ratchet/internal/note"
 	"github.com/project-oak/git-ratchet/internal/policy"
@@ -37,6 +38,7 @@ func main() {
 	subcommands.Register(subcommands.FlagsCommand(), "")
 	subcommands.Register(subcommands.CommandsCommand(), "")
 
+	subcommands.Register(&logCmd{}, "")
 	subcommands.Register(&checkpointCmd{}, "")
 	subcommands.Register(&checkpointRequestCmd{}, "")
 	subcommands.Register(&checkpointStoreCmd{}, "")
@@ -55,6 +57,7 @@ type checkpointCmd struct {
 	keyPath    string
 	kmsKey     string
 	repoDir    string
+	mode       string
 }
 
 func (*checkpointCmd) Name() string     { return "checkpoint" }
@@ -78,6 +81,12 @@ func (*checkpointCmd) Usage() string {
   the first commit it is witnessed at, and any subsequent checkpoint with a
   different commit is rejected.
 
+  With --mode ` + modeTlog + ` there is no --ref: the checkpoint covers the whole
+  transparency log, and refs are recorded in it by "git-ratchet log". Witnesses
+  cosign only that the log grew by appending; the ratchet rules above are
+  enforced locally, by this command before it asks for cosignatures and by
+  "git-ratchet verify" afterwards.
+
 `
 }
 
@@ -88,26 +97,26 @@ func (c *checkpointCmd) SetFlags(f *flag.FlagSet) {
 	f.StringVar(&c.keyPath, "key", "", "Path to origin private key file (required unless --kms-key is set)")
 	f.StringVar(&c.kmsKey, "kms-key", "", "GCP KMS key resource name for remote signing (alternative to --key)")
 	f.StringVar(&c.repoDir, "repo", ".", "Path to git repository")
+	f.StringVar(&c.mode, "mode", modeGitCheckpoint, "Checkpoint format: "+modeGitCheckpoint+" or "+modeTlog)
 }
 
 func (c *checkpointCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...any) subcommands.ExitStatus {
-	if c.ref == "" || c.policyPath == "" {
-		fmt.Fprintln(os.Stderr, "error: --ref, --policy, and one of --key or --kms-key are required")
+	if err := validateMode(c.mode); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return subcommands.ExitUsageError
+	}
+	if err := checkpointRefFlag(c.mode, c.ref); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		fmt.Fprint(os.Stderr, c.Usage())
 		return subcommands.ExitUsageError
 	}
-	if c.keyPath == "" && c.kmsKey == "" {
-		fmt.Fprintln(os.Stderr, "error: --ref, --policy, and one of --key or --kms-key are required")
+	if c.policyPath == "" || (c.keyPath == "" && c.kmsKey == "") {
+		fmt.Fprintln(os.Stderr, "error: --policy and one of --key or --kms-key are required")
 		fmt.Fprint(os.Stderr, c.Usage())
 		return subcommands.ExitUsageError
 	}
 	if c.keyPath != "" && c.kmsKey != "" {
 		fmt.Fprintln(os.Stderr, "error: --key and --kms-key are mutually exclusive")
-		return subcommands.ExitUsageError
-	}
-
-	if _, err := gitutil.ParseRefKind(c.ref); err != nil {
-		fmt.Fprintf(os.Stderr, "error: invalid --ref: %v\n", err)
 		return subcommands.ExitUsageError
 	}
 
@@ -133,6 +142,20 @@ func (c *checkpointCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...any) su
 	origin := c.origin
 	if origin == "" {
 		origin = signer.Name
+	}
+
+	// The two modes read different policy grammars; see internal/policy/tlog.go.
+	if c.mode == modeTlog {
+		tpol, err := policy.FromPath(c.policyPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: loading policy: %v\n", err)
+			return subcommands.ExitFailure
+		}
+		if err := checkpointTlog(c.repoDir, origin, signer, tpol); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			return subcommands.ExitFailure
+		}
+		return subcommands.ExitSuccess
 	}
 
 	// Load the policy for witnesses and quorum (the log line is not
@@ -278,6 +301,67 @@ func assembleAndStoreCheckpoint(repoDir, ref, signedNote string, cosigLines []st
 	}
 
 	return nil
+}
+
+type logCmd struct {
+	refs    stringSlice
+	repoDir string
+	mode    string
+}
+
+func (*logCmd) Name() string     { return "log" }
+func (*logCmd) Synopsis() string { return "Record refs' current objects in the transparency log" }
+func (*logCmd) Usage() string {
+	return `log [flags]:
+  Record each ref's current object in the repository's transparency log.
+
+  This is the only command that grows the log. It is local: no key, and no
+  witnesses are contacted. The new entries sit past the stored checkpoint
+  until "git-ratchet checkpoint" has a quorum cosign the log's new head, and
+  until then nothing verifies against them.
+
+  A ref already at its latest logged state is skipped, so running this twice
+  in a row does not grow the log. Pass --ref more than once to record several
+  refs in a single entry batch.
+
+  Only supported with --mode ` + modeTlog + `; ` + modeGitCheckpoint + ` mode has no log.
+
+`
+}
+
+func (c *logCmd) SetFlags(f *flag.FlagSet) {
+	f.Var(&c.refs, "ref", "Full ref path to record (e.g. refs/heads/main or refs/tags/v1.0.0), repeatable (required)")
+	f.StringVar(&c.repoDir, "repo", ".", "Path to git repository")
+	f.StringVar(&c.mode, "mode", modeGitCheckpoint, "Checkpoint format: "+modeGitCheckpoint+" or "+modeTlog)
+}
+
+func (c *logCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...any) subcommands.ExitStatus {
+	if err := validateMode(c.mode); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return subcommands.ExitUsageError
+	}
+	if c.mode != modeTlog {
+		fmt.Fprintf(os.Stderr, "error: log requires --mode %s: %s mode keeps no log, and its checkpoints "+
+			"are made one ref at a time with `git-ratchet checkpoint --ref`\n", modeTlog, modeGitCheckpoint)
+		return subcommands.ExitUsageError
+	}
+	if len(c.refs) == 0 {
+		fmt.Fprintln(os.Stderr, "error: at least one --ref is required")
+		fmt.Fprint(os.Stderr, c.Usage())
+		return subcommands.ExitUsageError
+	}
+	for _, ref := range c.refs {
+		if _, err := gitutil.ParseRefKind(ref); err != nil {
+			fmt.Fprintf(os.Stderr, "error: invalid --ref %q: %v\n", ref, err)
+			return subcommands.ExitUsageError
+		}
+	}
+
+	if err := logRefsTlog(c.repoDir, c.refs); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return subcommands.ExitFailure
+	}
+	return subcommands.ExitSuccess
 }
 
 type checkpointRequestCmd struct {
@@ -477,6 +561,7 @@ type verifyCmd struct {
 	refs       stringSlice
 	policyPath string
 	repoDir    string
+	mode       string
 }
 
 func (*verifyCmd) Name() string     { return "verify" }
@@ -499,9 +584,14 @@ func (c *verifyCmd) SetFlags(f *flag.FlagSet) {
 	f.Var(&c.refs, "ref", "Full ref path to verify (e.g. refs/heads/main) (required, repeatable)")
 	f.StringVar(&c.policyPath, "policy", "", "Path to witness policy file (required)")
 	f.StringVar(&c.repoDir, "repo", ".", "Path to git repository")
+	f.StringVar(&c.mode, "mode", modeGitCheckpoint, "Checkpoint format: "+modeGitCheckpoint+" or "+modeTlog)
 }
 
 func (c *verifyCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...any) subcommands.ExitStatus {
+	if err := validateMode(c.mode); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return subcommands.ExitUsageError
+	}
 	if c.policyPath == "" || len(c.refs) == 0 {
 		fmt.Fprintln(os.Stderr, "error: --policy and at least one --ref are required")
 		fmt.Fprint(os.Stderr, c.Usage())
@@ -515,30 +605,7 @@ func (c *verifyCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...any) subcom
 		}
 	}
 
-	// Load the policy.
-	pol, err := policy.Load(c.policyPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: loading policy: %v\n", err)
-		return subcommands.ExitFailure
-	}
-
-	refs := []string(c.refs)
-
-	// Verify refs in parallel.
-	type verifyResult struct {
-		ref string
-		err error
-	}
-	results := make([]verifyResult, len(refs))
-	var wg sync.WaitGroup
-	for i, ref := range refs {
-		wg.Add(1)
-		go func(i int, ref string) {
-			defer wg.Done()
-			results[i] = verifyResult{ref, verifySingleRef(c.repoDir, ref, pol)}
-		}(i, ref)
-	}
-	wg.Wait()
+	results := verifyRefs(c.repoDir, []string(c.refs), c.policyPath, c.mode)
 
 	failed := 0
 	for _, r := range results {
@@ -550,10 +617,69 @@ func (c *verifyCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...any) subcom
 		}
 	}
 	if failed > 0 {
-		fmt.Fprintf(os.Stderr, "\n%d of %d refs failed verification\n", failed, len(refs))
+		fmt.Fprintf(os.Stderr, "\n%d of %d refs failed verification\n", failed, len(c.refs))
 		return subcommands.ExitFailure
 	}
 	return subcommands.ExitSuccess
+}
+
+// verifyResult pairs a ref with the outcome of verifying it.
+type verifyResult struct {
+	ref string
+	err error
+}
+
+// verifyRefs verifies each ref against the policy in the given mode.
+//
+// The two modes parallelise differently. A git-checkpoint verification is
+// independent per ref, so those run concurrently. A tlog verification shares
+// one log: its checkpoint is verified once up front — a failure there fails
+// every ref — and the per-ref walks then run against that single verified log.
+func verifyRefs(repoDir string, refs []string, policyPath string, mode string) []verifyResult {
+	results := make([]verifyResult, len(refs))
+
+	if mode == modeTlog {
+		l, err := tlogLogFromPolicy(repoDir, policyPath)
+		if err != nil {
+			for i, ref := range refs {
+				results[i] = verifyResult{ref, err}
+			}
+			return results
+		}
+		for i, ref := range refs {
+			results[i] = verifyResult{ref, verifySingleRefTlog(repoDir, ref, l)}
+		}
+		return results
+	}
+
+	pol, err := policy.Load(policyPath)
+	if err != nil {
+		for i, ref := range refs {
+			results[i] = verifyResult{ref, fmt.Errorf("loading policy: %w", err)}
+		}
+		return results
+	}
+
+	var wg sync.WaitGroup
+	for i, ref := range refs {
+		wg.Add(1)
+		go func(i int, ref string) {
+			defer wg.Done()
+			results[i] = verifyResult{ref, verifySingleRef(repoDir, ref, pol)}
+		}(i, ref)
+	}
+	wg.Wait()
+	return results
+}
+
+// tlogLogFromPolicy loads a tlog-policy and returns the checkpointed part of
+// the repository's log under it.
+func tlogLogFromPolicy(repoDir, policyPath string) (*gitlog.Log, error) {
+	tpol, err := policy.FromPath(policyPath)
+	if err != nil {
+		return nil, fmt.Errorf("loading policy: %w", err)
+	}
+	return checkpointedLog(repoDir, tpol)
 }
 
 // verifySingleRef verifies a single ref's checkpoint against the policy.
@@ -624,6 +750,7 @@ type auditCmd struct {
 	refs       stringSlice
 	policyPath string
 	repoDir    string
+	mode       string
 }
 
 func (*auditCmd) Name() string     { return "audit" }
@@ -652,9 +779,14 @@ func (c *auditCmd) SetFlags(f *flag.FlagSet) {
 	f.Var(&c.refs, "ref", "Full ref path to verify (e.g. refs/heads/main) (required, repeatable)")
 	f.StringVar(&c.policyPath, "policy", "", "Path to witness policy file (required)")
 	f.StringVar(&c.repoDir, "repo", ".", "Path to git repository")
+	f.StringVar(&c.mode, "mode", modeGitCheckpoint, "Checkpoint format: "+modeGitCheckpoint+" or "+modeTlog)
 }
 
 func (c *auditCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...any) subcommands.ExitStatus {
+	if err := validateMode(c.mode); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return subcommands.ExitUsageError
+	}
 	if c.policyPath == "" || len(c.refs) == 0 {
 		fmt.Fprintln(os.Stderr, "error: --policy and at least one --ref are required")
 		fmt.Fprint(os.Stderr, c.Usage())
@@ -681,26 +813,7 @@ func (c *auditCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...any) subcomm
 
 	// Phase 2: git-ratchet verify — check all refs.
 	fmt.Println("Running checkpoint verification...")
-	pol, err := policy.Load(c.policyPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: loading policy: %v\n", err)
-		return subcommands.ExitUsageError
-	}
-	refs := []string(c.refs)
-	type verifyResult struct {
-		ref string
-		err error
-	}
-	results := make([]verifyResult, len(refs))
-	var wg sync.WaitGroup
-	for i, ref := range refs {
-		wg.Add(1)
-		go func(i int, ref string) {
-			defer wg.Done()
-			results[i] = verifyResult{ref, verifySingleRef(c.repoDir, ref, pol)}
-		}(i, ref)
-	}
-	wg.Wait()
+	results := verifyRefs(c.repoDir, []string(c.refs), c.policyPath, c.mode)
 	for _, r := range results {
 		if r.err != nil {
 			fmt.Fprintf(os.Stderr, "FAIL verify %s: %v\n", r.ref, r.err)
@@ -733,4 +846,16 @@ func (c *auditCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...any) subcomm
 	}
 	fmt.Println("\naudit: all checks passed")
 	return subcommands.ExitSuccess
+}
+
+// writeRequestFiles writes the add-checkpoint request and the signed note that
+// checkpoint-request produces.
+func writeRequestFiles(requestPath, request, notePath, signed string) error {
+	if err := os.WriteFile(requestPath, []byte(request), 0644); err != nil {
+		return fmt.Errorf("writing request to %s: %w", requestPath, err)
+	}
+	if err := os.WriteFile(notePath, []byte(signed), 0644); err != nil {
+		return fmt.Errorf("writing note to %s: %w", notePath, err)
+	}
+	return nil
 }
