@@ -40,7 +40,7 @@ The origin is a fixed, canonical identifier for the repository. It is not derive
 
 ## Signatures
 
-The checkpoint is signed by the origin and cosigned by zero or more witnesses. Supported signature algorithms are Ed25519 and ML-DSA-44. The origin signs the checkpoint body following the [signed note][signed-note] format. Witnesses append [cosignatures][tlog-cosignature]:
+The checkpoint is signed by the origin and cosigned by zero or more witnesses. The origin signs the checkpoint body following the [signed note][signed-note] format. Witnesses append [cosignatures][tlog-cosignature]:
 
 ```
 <origin> <refpath>
@@ -49,6 +49,15 @@ The checkpoint is signed by the origin and cosigned by zero or more witnesses. S
 — <origin-name>+<key-hash> <base64 signature>
 — <witness-name>+<key-hash> <base64 cosignature>
 ```
+
+Signatures are Ed25519: [signed-note][signed-note] algorithm `0x01` for the
+origin, `0x04` for cosignatures. ML-DSA-44 (`0x06`) is not available here.
+C2SP assigns `0x06` to the [tlog-cosignature][tlog-cosignature]
+`cosigned_message`, a binary structure committing to a log origin, a leaf range
+and a Merkle root — a git-checkpoint has none of those, and there is no other
+construction the algorithm byte could denote. ML-DSA-44 keys are usable in
+`tlog` mode, whose checkpoint does carry those values; see
+[docs/tlog-variant.md](tlog-variant.md).
 
 ## Hash function support
 
