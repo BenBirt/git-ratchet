@@ -72,7 +72,7 @@ git-ratchet verify     --mode tlog --ref refs/heads/main --policy policy.txt
 
 git-ratchet supports two types of witnesses:
 
-- **Non-HTTP witnesses**: `checkpoint-request` and `checkpoint-store` decompose the flow so cosignatures can be collected out of band; both support `--mode tlog`.
+- **Non-HTTP witnesses**: `checkpoint-request` and `checkpoint-store` decompose the flow so cosignatures can be collected out of band. Both modes support this.
 - **HTTP witnesses**: A standalone server (deployed e.g. on Cloud Run) that responds to the [witness HTTP protocol](docs/witness-protocol.md). See [deploy/witness/README.md](deploy/witness/README.md) for deployment.
 - **GitHub Issue witnesses**: A GitHub repository that cosigns checkpoints via GitHub Actions, using GitHub Issues as the transport. See [docs/github-issue-witness.md](docs/github-issue-witness.md) for setup.
 
@@ -113,7 +113,7 @@ git-ratchet checkpoint-request \
 
 Produces the add-checkpoint request body (ancestry proof + signed note) without contacting any witnesses. The output can later be submitted to witnesses out-of-band. The origin identity is derived from the key file; use `--origin` to override (required when using `--kms-key`).
 
-The decomposed workflow (`checkpoint-request` / `checkpoint-store`) supports `git-checkpoint` mode only. `tlog` mode requires HTTP witnesses.
+The decomposed workflow (`checkpoint-request` / `checkpoint-store`) supports both modes, so either can be witnessed over HTTP or by a GitHub Issue witness.
 
 ### `git-ratchet checkpoint-store`
 
