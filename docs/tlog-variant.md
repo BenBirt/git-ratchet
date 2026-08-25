@@ -6,7 +6,7 @@ This document specifies `tlog` mode: an alternative to git-ratchet's default
 repository as Git refs, and checkpointed with a standard
 [tlog-checkpoint][] cosigned by standard [tlog-witness][] witnesses.
 
-Both modes ship. Select one with `--mode`:
+Both modes are available. Select one with `--mode`:
 
 ```
 git-ratchet log        --mode tlog ...
@@ -39,21 +39,19 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
 
 ## Why
 
-In `git-checkpoint` mode the witness verifies Git commit ancestry. That makes
-the ratchet an *enforced* property — a witness will not cosign a rollback — but
-it means every witness must run git-ratchet's own witness implementation. Since
-the security of a ratchet rests on witness *diversity*, and diversity requires
-witness operators who have no relationship with the origin, requiring bespoke
-software to participate is a real obstacle.
+In `git-checkpoint` mode the witness verifies Git commit ancestry, so it will
+not cosign a rollback. Doing that requires a witness specification of
+git-ratchet's own: an operator can only witness a git-ratchet repository by
+running git-ratchet's witness. The security of a ratchet rests on witness
+diversity, and a bespoke specification is an obstacle to it.
 
 `tlog` mode removes that obstacle. The checkpoint is an ordinary
 `tlog-checkpoint` and the witness call is an ordinary `tlog-witness`
 `add-checkpoint`, so any conforming witness can cosign a git-ratchet log
 without knowing what Git is.
 
-The cost is stated plainly in [Security properties](#security-properties)
-below: the ratchet stops being enforced at cosigning time and becomes a
-property that verifiers establish for themselves.
+The ratchet is enforced in both modes. What changes is where: see
+[Security properties](#security-properties).
 
 ## The log
 

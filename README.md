@@ -46,16 +46,19 @@ git-ratchet supports two checkpoint formats, selected with `--mode`.
 | What is stored | A signed note per ref, at `refs/checkpoints/*` | A Merkle transparency log of ref updates, at `refs/ratchet/log` |
 | What the witness checks | Git commit ancestry | Merkle tree consistency |
 | Witness protocol | [git-ratchet's own](docs/witness-protocol.md) | C2SP [tlog-witness](https://c2sp.org/tlog-witness) |
-| Witness implementation | git-ratchet ships one | Use any on the existing network |
-| A rollback is caught by | The witness, refusing to cosign | `verify`, walking the logged entries |
+| Witness implementation | git-ratchet provides one | Any on the existing network |
+| A rollback is refused by | The witness, at cosigning time | `verify`, at verification time |
+| `verify` does | O(1): checks one signed note | O(entries for the ref): walks the log |
 
-`git-checkpoint` mode gives the stronger guarantee — a witness will not cosign a rollback at all — at the cost of requiring every witness operator to run git-ratchet's own implementation.
+Both modes give the same guarantee, and in both the relying party establishes it by running `verify`. What differs is where the ratchet is enforced, and so how much work `verify` has to do.
 
-`tlog` mode trades that for interoperability: the checkpoint is a standard [tlog-checkpoint](https://c2sp.org/tlog-checkpoint) with no Git-specific fields, so witnesses that have never heard of git-ratchet can cosign it, and git-ratchet ships no witness of its own for this mode. In exchange, the witness can no longer tell a fast-forward from a rollback, and the ratchet is established by `verify` walking the logged entries — a local, inexpensive walk, since the log ships with the repository.
+In `git-checkpoint` mode the witness has already checked ancestry, so `verify` need only check a signed note. The cost is a bespoke witness protocol: an operator can only witness a git-ratchet repository by running git-ratchet's own witness.
 
-`log` and `checkpoint` also refuse to record a rewrite, but that is there to keep an operator from destroying a ref by accident, not to stop an attacker — anyone who can write to the log ref can push entries without going near those commands. In `tlog` mode, `verify` is the security control.
+In `tlog` mode the checkpoint is a standard [tlog-checkpoint](https://c2sp.org/tlog-checkpoint) with no Git-specific fields, so any witness on the existing network can cosign it. The witness cannot tell a fast-forward from a rollback, so `verify` establishes ancestry itself by walking the logged entries — a local walk, since the log is contained by the repository.
 
-See [docs/tlog-variant.md](docs/tlog-variant.md) for the full specification and an honest account of what each mode does and does not guarantee.
+`log` and `checkpoint` also refuse to record a rewrite. That is there to keep an operator from destroying a ref by accident, not to stop an attacker: anyone who can write to the log ref can push entries without going near those commands.
+
+See [docs/tlog-variant.md](docs/tlog-variant.md) for the full specification and a comparison of the two modes.
 
 In `tlog` mode, recording a ref and checkpointing the log are separate steps:
 `log` grows the log locally, and `checkpoint` gets whatever the log holds
