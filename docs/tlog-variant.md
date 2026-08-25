@@ -73,9 +73,8 @@ ref-record/v1
 refs/heads/main 4f0f30afb02b71590f0b2e0a67f0b846715e1d04
 ```
 
-Bundles length-prefix entries (see [Storage](#storage)), so an entry is an
-opaque byte string as far as the log is concerned. It may contain newlines
-freely, and a type may define as many lines as it needs.
+An entry is an opaque byte string as far as the log is concerned, so a type may
+define as many lines as it needs.
 
 #### `ref-record/v1`
 
@@ -196,33 +195,17 @@ Witnesses append [tlog-cosignature][] lines.
 
 ### Signature algorithms
 
-Signatures are verified by [transparency-dev/formats][formats], which selects
-each key's construction from its [signed-note][] algorithm byte:
+Signatures follow [signed-note][] and [tlog-cosignature][], and are produced and
+verified by [transparency-dev/formats][formats].
 
-| Byte | Construction | Signed message |
-| --- | --- | --- |
-| `0x01` | Ed25519 note signature | the checkpoint body |
-| `0x04` | Ed25519 cosignature | `cosignature/v1\ntime <unix>\n` then the body |
-| `0x06` | ML-DSA-44 (sub)tree cosignature | the binary `cosigned_message` struct |
-
-There is no fourth row. C2SP assigns `0x06` to "timestamped ML-DSA-44 (sub)tree
-cosignatures" and assigns *nothing* to a plain ML-DSA-44 signature over a note's
-text, so an ML-DSA-44 signature is always the `cosigned_message` construction —
-including when the signer is the log. A log signing its own checkpoint therefore
-signs the message a witness would sign, over the range `[0, size)`: its own name
-as `cosigner_name`, the checkpoint's origin as `log_origin`, `start` 0, `end`
-the tree size, and `hash` the root hash.
-
-That construction is well defined only over a tlog-checkpoint, which is why
-ML-DSA-44 keys work in this mode and not in `git-checkpoint` mode. A
-git-checkpoint note has no log origin, no leaf range and no Merkle root, so
-there is nothing honest to put in those fields; `git-checkpoint` mode is
-Ed25519-only.
-
-ML-DSA-44 signatures are produced by that library too. Ed25519 signatures are
-produced by git-ratchet's own code, which emits the same bytes; the library's
-signers take a private key, and a KMS-backed key has no local key material to
-give them.
+One consequence is specific to this mode. signed-note assigns `0x06` to
+timestamped ML-DSA-44 (sub)tree cosignatures and assigns nothing to a plain
+ML-DSA-44 signature over a note's text, so an ML-DSA-44 signature is always the
+`cosigned_message` construction, including when the signer is the log. That
+construction names a log origin, a leaf range and a Merkle root, so it is
+defined only over a tlog-checkpoint. ML-DSA-44 keys therefore work in this mode
+and not in `git-checkpoint` mode, whose notes have no such fields;
+`git-checkpoint` mode is Ed25519-only.
 
 [formats]: https://github.com/transparency-dev/formats
 
@@ -236,27 +219,18 @@ checkpoint            the cosigned tlog-checkpoint
 tile/entries/<path>   entry bundles, 256 entries each
 ```
 
-Entry bundles use the tlog-tiles paths and encoding. Paths carry the bundle
-index in base-1000 groups of three digits joined by `/`, every group but the
-last prefixed with `x`, and a `.p/<width>` suffix while the bundle is not yet
-full: bundle 0 is `tile/entries/000` once full and `tile/entries/000.p/17` at
-seventeen entries; bundle 1234567 is `tile/entries/x001/x234/567`.
+Bundle paths and encoding are [tlog-tiles][]'s, via the reference
+implementation in `tessera/api`, so a tlog-tiles client can read these bundles
+directly. Entries are opaque byte strings of at most 65535 bytes.
 
-Within a bundle, entries are concatenated, each prefixed with its length as a
-big-endian `uint16`. Entries are therefore opaque byte strings, limited to
-65535 bytes. Paths and decoding both come from the reference implementation in
-`tessera/api`, so a tlog-tiles client can read these bundles directly.
-
-One consequence worth knowing: the length prefixes contain NUL bytes, so Git
-treats bundle blobs as binary and `git log -p` on the log ref reports "Binary
-files differ" rather than showing added entries. `git cat-file -p` still prints
-them, and the entries themselves are plain text.
-
-Storing the log as a commit rather than a blob has a useful consequence: the
-log ref can only be advanced by a fast-forward push, so an ordinary Git server
-rejects a rewritten log before any git-ratchet code runs. That is a
-belt-and-braces check, not a security control — a server under the origin's
-control can be told to accept a force-push — but it costs nothing.
+Two practical notes. The bundle framing contains NUL bytes, so Git treats
+bundle blobs as binary: `git log -p` on the log ref reports "Binary files
+differ" rather than showing added entries, though `git cat-file -p` prints them
+and the entries themselves are plain text. And storing the log as a commit
+means the log ref can only be advanced by a fast-forward push, so an ordinary
+Git server rejects a rewritten log before any git-ratchet code runs — not a
+security control, since a server under the origin's control can be told to
+accept a force-push, but it costs nothing.
 
 #### Hash tiles are not stored
 
