@@ -487,41 +487,36 @@ repository cannot produce it.
 
 ## Security properties
 
-The two modes protect the same thing and detect the same attacks. They differ
-in **who establishes the ratchet**, and the difference is worth being precise
-about.
+Both modes give the same guarantee, and in both a relying party establishes it
+by running `verify`. They differ in where the ratchet is enforced, and so in
+how much `verify` has to do.
 
 | | `git-checkpoint` | `tlog` |
 | :--- | :--- | :--- |
 | Witness verifies | Git commit ancestry | Merkle tree consistency |
-| Witness can cosign a rollback | No | **Yes** |
-| A rollback is caught by | The witness, refusing to cosign | The verifier, walking the log |
-| …at | Cosigning time, before it is recorded | Verification time, after it is recorded |
-| Verifier work | O(1): check one signed note | O(entries for the ref), all local |
-| Usable with third-party witnesses | No | **Yes** |
+| Witness can cosign a rollback | No | Yes |
+| A rollback is refused by | The witness, at cosigning time | `verify`, at verification time |
+| `verify` does | O(1): checks one signed note | O(entries for the ref): walks the log |
+| Usable with third-party witnesses | No | Yes |
 | Checkpoint meaningful standalone | Yes — asserts a ref is at a commit | No — asserts only a log's head |
 
-`log` and `checkpoint` also refuse to record a rewrite, but they are deliberately
-absent from that table. They are not what catches an attack; see
+`log` and `checkpoint` also refuse to record a rewrite. They are absent from
+that table because they protect the operator, not the relying party: see
 [The chain walks here are not security controls](#the-chain-walks-here-are-not-security-controls).
 
-Three consequences deserve emphasis:
+Three consequences:
 
-**Verification is the only security control in this mode.** Everything the
-ratchet guarantees is established by `verify`, walking the logged entries
-against the repository, and by nothing else. It is the only check performed by
-a party who does not have to trust whoever wrote the log — which is the only
-kind of check an attacker cannot simply decline to run. The refusals in `log`
-and `checkpoint` guard an operator against their own mistakes. Treating them as
-a defence would be a mistake in the other direction: an attacker with write
-access to the log ref never invokes them.
+**A witness will cosign a rollback.** Appending a rolled-back state to a log is
+a consistent log operation, and a witness that sees only tree heads has no
+basis to object; nothing in a consistency proof says anything about Git
+ancestry. What the witness attests to is that the log is append-only, which is
+what makes a rollback, once recorded, undeniable.
 
-**A witness will cosign a rollback.** This is not a defect; appending a
-rolled-back state to a log is a perfectly consistent log operation, and a
-witness that only sees tree heads has no basis to object. Nothing in a
-consistency proof says anything about Git ancestry. What the witness attests to
-is that the log is append-only — which is what makes a rollback, once recorded,
-undeniable rather than deniable.
+**`verify` does the ancestry check itself.** In `git-checkpoint` mode the
+witness has done it, so `verify` reads one signed note. Here `verify` walks the
+logged entries for the ref. It MUST do so on every run: it cannot know whether
+anything checked the log before it, and an attacker writing to the log ref
+would not have.
 
 **A checkpoint no longer means anything on its own.** A `git-checkpoint` is a
 semantic attestation — *this witness attests `main` is at this commit, having
@@ -529,16 +524,12 @@ arrived there by fast-forward* — and can be quoted as evidence by someone who
 does not have the repository. A `tlog-checkpoint` attests only that a log is
 append-only and its head is this. Anything that consumes checkpoints outside
 `git-ratchet verify` — a build attestation referencing one, say — is relying on
-a property `tlog` mode does not provide.
+a property `tlog` mode does not provide. This is the one respect in which the
+two modes are not interchangeable.
 
-What is *not* weakened is tamper-evidence. A rollback that reaches the log is
-permanent, cosigned, and undeniable; the log cannot be rewritten to remove it
-without losing witness cosignatures. Detection moves from the witness to the
-verifier, which can do it with what it already has.
-
-That permanence is also why `log` refuses to write a rewrite — not to stop an
-attacker, who would not be running it, but because the same permanence that
-makes an attack undeniable makes an accident unrecoverable.
+Tamper-evidence is unchanged. A rollback that reaches the log is permanent,
+cosigned, and undeniable; the log cannot be rewritten to remove it without
+losing witness cosignatures.
 
 ## Implementation
 
