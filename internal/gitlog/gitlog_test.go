@@ -1,0 +1,416 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package gitlog
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	flog "github.com/transparency-dev/formats/log"
+	mproof "github.com/transparency-dev/merkle/proof"
+	"github.com/transparency-dev/merkle/rfc6962"
+
+	"github.com/project-oak/git-ratchet/internal/tlog"
+)
+
+// initRepo creates a new Git repository in a temp directory with one commit.
+func initRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	run(t, dir, "git", "init", "--initial-branch=main", ".")
+	run(t, dir, "git", "config", "user.email", "test@test.com")
+	run(t, dir, "git", "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("hello\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, dir, "git", "add", ".")
+	run(t, dir, "git", "commit", "-m", "initial")
+	return dir
+}
+
+func run(t *testing.T, dir string, name string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s %s failed: %v\n%s", name, strings.Join(args, " "), err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// obj expands a short label into a valid 40-character hex object hash, so
+// tests can stay readable while exercising the real validation rules.
+func obj(label string) string {
+	h := label
+	if len(h) > 40 {
+		h = h[:40]
+	}
+	return h + strings.Repeat("0", 40-len(h))
+}
+
+// mustRefRecord builds a ref-update entry or fails the test.
+func mustRefRecord(t *testing.T, ref, object string) Entry {
+	t.Helper()
+	e, err := NewRefRecord(ref, object)
+	if err != nil {
+		t.Fatalf("NewRefRecord(%q, %q): %v", ref, object, err)
+	}
+	return e
+}
+
+func mustOpen(t *testing.T, dir string) *Log {
+	t.Helper()
+	l, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	return l
+}
+
+func TestOpenEmptyRepo(t *testing.T) {
+	dir := initRepo(t)
+	l := mustOpen(t, dir)
+
+	if l.Size() != 0 {
+		t.Errorf("Size() = %d, want 0", l.Size())
+	}
+	if l.head != "" {
+		t.Errorf("Head() = %q, want empty", l.head)
+	}
+	if l.StoredCheckpoint() != "" {
+		t.Errorf("StoredCheckpoint() = %q, want empty", l.StoredCheckpoint())
+	}
+	if l.Root() != tlog.Root(nil) {
+		t.Error("an empty log should have the empty tree root")
+	}
+}
+
+func TestAppendAndReopen(t *testing.T) {
+	dir := initRepo(t)
+
+	l := mustOpen(t, dir)
+	l.Append(mustRefRecord(t, "refs/heads/main", obj("aaaa")))
+	l.Append(mustRefRecord(t, "refs/tags/v1.0.0", obj("bbbb")))
+	if err := l.Save("checkpoint-body", "log: two entries"); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	wantRoot := l.Root()
+
+	reopened := mustOpen(t, dir)
+	if reopened.Size() != 2 {
+		t.Fatalf("Size() = %d, want 2", reopened.Size())
+	}
+	if reopened.Root() != wantRoot {
+		t.Error("root changed across a save/reopen cycle")
+	}
+	if reopened.StoredCheckpoint() != "checkpoint-body" {
+		t.Errorf("StoredCheckpoint() = %q", reopened.StoredCheckpoint())
+	}
+	entries := reopened.entries
+	for i, want := range []RefRecord{
+		{Ref: "refs/heads/main", Object: obj("aaaa")},
+		{Ref: "refs/tags/v1.0.0", Object: obj("bbbb")},
+	} {
+		got, err := entries[i].AsRefRecord()
+		if err != nil {
+			t.Fatalf("entry %d: %v", i, err)
+		}
+		if got != want {
+			t.Errorf("entry %d = %+v, want %+v", i, got, want)
+		}
+	}
+}
+
+// TestSaveIsFastForward checks that each save chains onto the previous log
+// commit, so the log ref only ever advances.
+func TestSaveIsFastForward(t *testing.T) {
+	dir := initRepo(t)
+
+	l := mustOpen(t, dir)
+	l.Append(mustRefRecord(t, "refs/heads/main", obj("aaaa")))
+	if err := l.Save("cp1", "first"); err != nil {
+		t.Fatal(err)
+	}
+	first := l.head
+
+	l2 := mustOpen(t, dir)
+	l2.Append(mustRefRecord(t, "refs/heads/main", obj("bbbb")))
+	if err := l2.Save("cp2", "second"); err != nil {
+		t.Fatal(err)
+	}
+	second := l2.head
+
+	if first == second {
+		t.Fatal("the second save should have produced a new commit")
+	}
+	// The new head must descend from the old one.
+	out := run(t, dir, "git", "rev-list", "--first-parent", second)
+	if !strings.Contains(out, first) {
+		t.Errorf("log head %s does not descend from %s", second, first)
+	}
+}
+
+// TestSaveRejectsConcurrentAdvance checks the compare-and-swap: a checkpointer
+// holding a stale view must not clobber entries another writer appended.
+func TestSaveRejectsConcurrentAdvance(t *testing.T) {
+	dir := initRepo(t)
+
+	l := mustOpen(t, dir)
+	l.Append(mustRefRecord(t, "refs/heads/main", obj("aaaa")))
+	if err := l.Save("cp1", "first"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two writers both open at size 1.
+	writerA := mustOpen(t, dir)
+	writerB := mustOpen(t, dir)
+
+	writerA.Append(mustRefRecord(t, "refs/heads/main", obj("bbbb")))
+	if err := writerA.Save("cp2", "from A"); err != nil {
+		t.Fatalf("first writer should succeed: %v", err)
+	}
+
+	writerB.Append(mustRefRecord(t, "refs/heads/other", obj("cccc")))
+	if err := writerB.Save("cp2b", "from B"); err == nil {
+		t.Error("expected the stale writer's save to be rejected")
+	}
+
+	// A's entry must still be there.
+	final := mustOpen(t, dir)
+	if final.Size() != 2 {
+		t.Fatalf("Size() = %d, want 2", final.Size())
+	}
+	mains, err := final.RefRecords("refs/heads/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mains) != 2 || mains[len(mains)-1].Object != obj("bbbb") {
+		t.Errorf("main entries = %+v, want latest %s", mains, obj("bbbb"))
+	}
+}
+
+// TestBundleRollover exercises the transition from a partial entry bundle to a
+// full one and on into a second bundle, which is where a stale partial-bundle
+// path would survive into the tree if the tree were patched rather than
+// rebuilt.
+func TestBundleRollover(t *testing.T) {
+	dir := initRepo(t)
+
+	const total = uint64(EntriesPerBundle + 5)
+	l := mustOpen(t, dir)
+	for i := uint64(0); i < total; i++ {
+		l.Append(mustRefRecord(t, "refs/heads/main", obj(fmt.Sprintf("%04x", i))))
+		if err := l.Save("cp", fmt.Sprintf("entry %d", i)); err != nil {
+			t.Fatalf("Save at %d: %v", i, err)
+		}
+	}
+
+	reopened := mustOpen(t, dir)
+	if reopened.Size() != total {
+		t.Fatalf("Size() = %d, want %d", reopened.Size(), total)
+	}
+	for i, e := range reopened.entries {
+		ru, err := e.AsRefRecord()
+		if err != nil {
+			t.Fatalf("entry %d: %v", i, err)
+		}
+		if want := obj(fmt.Sprintf("%04x", i)); ru.Object != want {
+			t.Fatalf("entry %d object = %q, want %q", i, ru.Object, want)
+		}
+	}
+
+	// The full first bundle must live at its unsuffixed path, and only the
+	// second, still-partial bundle may carry a ".p/" suffix.
+	paths := run(t, dir, "git", "ls-tree", "-r", "--name-only", LogRef, "tile/entries/")
+	if !strings.Contains(paths, "tile/entries/000\n") && !strings.HasSuffix(paths, "tile/entries/000") {
+		t.Errorf("expected a full bundle at tile/entries/000, got:\n%s", paths)
+	}
+	if !strings.Contains(paths, "tile/entries/001.p/5") {
+		t.Errorf("expected a partial bundle at tile/entries/001.p/5, got:\n%s", paths)
+	}
+	if strings.Contains(paths, "tile/entries/000.p/") {
+		t.Errorf("a superseded partial bundle survived into the tree:\n%s", paths)
+	}
+}
+
+func TestRefRecordsFiltersByRef(t *testing.T) {
+	dir := initRepo(t)
+	l := mustOpen(t, dir)
+	l.Append(mustRefRecord(t, "refs/heads/main", obj("a1")))
+	l.Append(mustRefRecord(t, "refs/heads/dev", obj("b1")))
+	l.Append(mustRefRecord(t, "refs/heads/main", obj("a2")))
+	if err := l.Save("cp", "entries"); err != nil {
+		t.Fatal(err)
+	}
+
+	mains, err := l.RefRecords("refs/heads/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mains) != 2 || mains[0].Object != obj("a1") || mains[1].Object != obj("a2") {
+		t.Errorf("RefRecords(main) = %+v", mains)
+	}
+
+	absent, err := l.RefRecords("refs/heads/absent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(absent) != 0 {
+		t.Errorf("RefRecords(absent) = %+v, want none", absent)
+	}
+}
+
+// TestProofsAgainstStoredLog checks that proofs generated from a reopened log
+// verify against the roots the log reports.
+func TestProofsAgainstStoredLog(t *testing.T) {
+	dir := initRepo(t)
+	l := mustOpen(t, dir)
+	for i := 0; i < 20; i++ {
+		l.Append(mustRefRecord(t, "refs/heads/main", obj(fmt.Sprintf("%04x", i))))
+	}
+	if err := l.Save("cp", "twenty entries"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A proof generated from the reopened log must verify against the tree the
+	// entries in the repository produce. The proof algorithms themselves are
+	// internal/tlog's and are tested there; what is checked here is that a log
+	// round-tripped through Git still yields the same leaves.
+	reopened := mustOpen(t, dir)
+	root := reopened.Root()
+
+	// Verified with the merkle library's own verifier: what is under test is
+	// that a log round-tripped through Git yields the leaves the proof is
+	// generated from. m starts at 1 because a proof from the empty tree has
+	// nothing to prove.
+	for m := uint64(1); m <= 20; m++ {
+		p, err := reopened.ConsistencyProofFrom(m)
+		if err != nil {
+			t.Fatalf("ConsistencyProofFrom(%d): %v", m, err)
+		}
+		oldRoot := tlog.Root(reopened.leafHashes()[:m])
+		raw := make([][]byte, 0, len(p))
+		for _, h := range p {
+			raw = append(raw, h[:])
+		}
+		if err := mproof.VerifyConsistency(rfc6962.DefaultHasher, m, 20, raw, oldRoot[:], root[:]); err != nil {
+			t.Errorf("VerifyConsistency(%d): %v", m, err)
+		}
+	}
+}
+
+// TestUnknownTypesAreSkipped pins the forward-compatibility rule: an entry of
+// a type this implementation does not recognise contributes its leaf to the
+// tree but is otherwise ignored.
+func TestUnknownTypesAreSkipped(t *testing.T) {
+	dir := initRepo(t)
+	l := mustOpen(t, dir)
+	l.Append(mustRefRecord(t, "refs/heads/main", obj("aaaa")))
+
+	future, err := ParseEntry([]byte("tombstone/v1\n" + obj("dead") + " refs/heads/main\nlegal request\n"))
+	if err != nil {
+		t.Fatalf("an unknown type must still parse: %v", err)
+	}
+	if future.known() {
+		t.Error("tombstone should not be a known type in this implementation")
+	}
+	l.Append(future)
+	if err := l.Save("cp", "with a future entry"); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened := mustOpen(t, dir)
+	if reopened.Size() != 2 {
+		t.Fatalf("Size() = %d, want 2: an unknown entry still occupies a leaf", reopened.Size())
+	}
+	mains, err := reopened.RefRecords("refs/heads/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mains) != 1 {
+		t.Errorf("RefRecords(main) = %+v, want only the ref-record entry", mains)
+	}
+}
+
+// checkpointFor returns a checkpoint over the log's first size entries.
+func checkpointFor(t *testing.T, l *Log, size uint64) flog.Checkpoint {
+	t.Helper()
+	prefix := &Log{entries: l.entries[:size]}
+	root := prefix.Root()
+	return flog.Checkpoint{Size: size, Hash: root[:]}
+}
+
+// TestCheckpointedIgnoresUnwitnessedEntries covers the trust boundary: entries
+// past the checkpoint's size are in the ref but no witness attested to them,
+// and anyone who can push to the log ref can put them there.
+func TestCheckpointedIgnoresUnwitnessedEntries(t *testing.T) {
+	dir := initRepo(t)
+	l := mustOpen(t, dir)
+	l.Append(mustRefRecord(t, "refs/heads/main", obj("aa")))
+	l.Append(mustRefRecord(t, "refs/heads/main", obj("bb")))
+	l.Append(mustRefRecord(t, "refs/heads/main", obj("cc")))
+
+	witnessed, err := l.Checkpointed(checkpointFor(t, l, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if witnessed.Size() != 2 {
+		t.Errorf("Size() = %d, want 2", witnessed.Size())
+	}
+
+	records, err := witnessed.RefRecords("refs/heads/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("got %d records, want 2", len(records))
+	}
+	if last := records[len(records)-1].Object; last != obj("bb") {
+		t.Errorf("latest witnessed record = %s, want %s", last, obj("bb"))
+	}
+}
+
+// TestCheckpointedRejectsMismatchedCheckpoints covers the two ways the log on
+// disk can fail to be the one the checkpoint was signed over: it is too short
+// to hold the witnessed entries, or its entries hash to something else.
+func TestCheckpointedRejectsMismatchedCheckpoints(t *testing.T) {
+	dir := initRepo(t)
+	l := mustOpen(t, dir)
+	l.Append(mustRefRecord(t, "refs/heads/main", obj("aa")))
+	l.Append(mustRefRecord(t, "refs/heads/main", obj("bb")))
+
+	if _, err := l.Checkpointed(flog.Checkpoint{Size: 3, Hash: make([]byte, 32)}); err == nil {
+		t.Error("expected a checkpoint larger than the log to be rejected")
+	}
+
+	// The right size, but the root over a different prefix.
+	wrong := checkpointFor(t, l, 1)
+	wrong.Size = 2
+	if _, err := l.Checkpointed(wrong); err == nil {
+		t.Error("expected a checkpoint whose root does not match the prefix to be rejected")
+	}
+
+	if _, err := l.Checkpointed(checkpointFor(t, l, 2)); err != nil {
+		t.Errorf("a checkpoint matching the log should be accepted: %v", err)
+	}
+	if _, err := l.Checkpointed(checkpointFor(t, l, 0)); err != nil {
+		t.Errorf("an empty checkpoint should be accepted: %v", err)
+	}
+}

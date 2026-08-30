@@ -15,28 +15,27 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
-    name = "policy",
+    name = "tlog",
     srcs = [
-        "policy.go",
+        "checkpoint.go",
         "tlog.go",
     ],
-    importpath = "github.com/project-oak/git-ratchet/internal/policy",
+    importpath = "github.com/project-oak/git-ratchet/internal/tlog",
     visibility = ["//:__subpackages__"],
     deps = [
-        "//internal/note",
-        "@com_github_transparency_dev_formats//policy",
+        "@com_github_transparency_dev_formats//log",
+        "@com_github_transparency_dev_merkle//compact",
+        "@com_github_transparency_dev_merkle//proof",
+        "@com_github_transparency_dev_merkle//rfc6962",
     ],
 )
 
 go_test(
-    name = "policy_test",
+    name = "tlog_test",
     srcs = [
-        "policy_test.go",
+        "checkpoint_test.go",
         "tlog_test.go",
     ],
-    embed = [":policy"],
-    deps = [
-        "//internal/note",
-        "//internal/tlog",
-    ],
+    embed = [":tlog"],
+    deps = ["@com_github_transparency_dev_merkle//proof"],
 )

@@ -20,12 +20,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/subcommands"
+	"github.com/project-oak/git-ratchet/internal/gitlog"
 	"github.com/project-oak/git-ratchet/internal/gitutil"
 	"github.com/project-oak/git-ratchet/internal/note"
 	"github.com/project-oak/git-ratchet/internal/policy"
@@ -37,9 +39,8 @@ func main() {
 	subcommands.Register(subcommands.FlagsCommand(), "")
 	subcommands.Register(subcommands.CommandsCommand(), "")
 
+	subcommands.Register(&logCmd{}, "")
 	subcommands.Register(&checkpointCmd{}, "")
-	subcommands.Register(&checkpointRequestCmd{}, "")
-	subcommands.Register(&checkpointStoreCmd{}, "")
 	subcommands.Register(&verifyCmd{}, "")
 	subcommands.Register(&auditCmd{}, "")
 
@@ -48,13 +49,49 @@ func main() {
 	os.Exit(int(subcommands.Execute(ctx)))
 }
 
+// witnessClient returns a client that reaches witnesses over HTTP, which is
+// every witness git-checkpoint mode has. The deadline is the caller's, via the
+// request context.
+func witnessClient() *http.Client {
+	return &http.Client{}
+}
+
+// tlogWitnessClient also reaches github-issue witnesses, which only tlog mode
+// has, by registering a transport for their scheme. The code that submits a
+// checkpoint therefore does not know which carrier it got.
+func tlogWitnessClient(githubToken string) *http.Client {
+	t := &http.Transport{}
+	t.RegisterProtocol(witness.IssueScheme, &witness.IssueTransport{Token: githubToken})
+	return &http.Client{Transport: t}
+}
+
+// requireGitHubToken reports whether the policy names a witness this client
+// cannot reach without a token.
+//
+// Skipping such a witness would quietly lower the quorum, so an unreachable
+// one is a usage error rather than a warning.
+func requireGitHubToken(endpoints []string, token string) error {
+	if token != "" {
+		return nil
+	}
+	for _, e := range endpoints {
+		if strings.HasPrefix(e, witness.IssueScheme+"://") {
+			return fmt.Errorf("witness %s needs --github-token: a token that can open an issue on the witness repository", e)
+		}
+	}
+	return nil
+}
+
 type checkpointCmd struct {
-	ref        string
-	origin     string
-	policyPath string
-	keyPath    string
-	kmsKey     string
-	repoDir    string
+	ref         string
+	origin      string
+	policyPath  string
+	keyPath     string
+	kmsKey      string
+	repoDir     string
+	mode        string
+	timeout     time.Duration
+	githubToken string
 }
 
 func (*checkpointCmd) Name() string     { return "checkpoint" }
@@ -78,6 +115,12 @@ func (*checkpointCmd) Usage() string {
   the first commit it is witnessed at, and any subsequent checkpoint with a
   different commit is rejected.
 
+  With --mode ` + modeTlog + ` there is no --ref: the checkpoint covers the whole
+  transparency log, and refs are recorded in it by "git-ratchet log". Witnesses
+  cosign only that the log grew by appending; the ratchet rules above are
+  enforced locally, by this command before it asks for cosignatures and by
+  "git-ratchet verify" afterwards.
+
 `
 }
 
@@ -88,26 +131,28 @@ func (c *checkpointCmd) SetFlags(f *flag.FlagSet) {
 	f.StringVar(&c.keyPath, "key", "", "Path to origin private key file (required unless --kms-key is set)")
 	f.StringVar(&c.kmsKey, "kms-key", "", "GCP KMS key resource name for remote signing (alternative to --key)")
 	f.StringVar(&c.repoDir, "repo", ".", "Path to git repository")
+	f.StringVar(&c.mode, "mode", modeGitCheckpoint, "Checkpoint format: "+modeGitCheckpoint+" or "+modeTlog)
+	f.DurationVar(&c.timeout, "witness-timeout", 30*time.Second, "How long to wait for each witness to cosign")
+	f.StringVar(&c.githubToken, "github-token", "", "GitHub token for reaching github-issue:// witnesses")
 }
 
 func (c *checkpointCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...any) subcommands.ExitStatus {
-	if c.ref == "" || c.policyPath == "" {
-		fmt.Fprintln(os.Stderr, "error: --ref, --policy, and one of --key or --kms-key are required")
+	if err := validateMode(c.mode); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return subcommands.ExitUsageError
+	}
+	if err := checkpointRefFlag(c.mode, c.ref); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		fmt.Fprint(os.Stderr, c.Usage())
 		return subcommands.ExitUsageError
 	}
-	if c.keyPath == "" && c.kmsKey == "" {
-		fmt.Fprintln(os.Stderr, "error: --ref, --policy, and one of --key or --kms-key are required")
+	if c.policyPath == "" || (c.keyPath == "" && c.kmsKey == "") {
+		fmt.Fprintln(os.Stderr, "error: --policy and one of --key or --kms-key are required")
 		fmt.Fprint(os.Stderr, c.Usage())
 		return subcommands.ExitUsageError
 	}
 	if c.keyPath != "" && c.kmsKey != "" {
 		fmt.Fprintln(os.Stderr, "error: --key and --kms-key are mutually exclusive")
-		return subcommands.ExitUsageError
-	}
-
-	if _, err := gitutil.ParseRefKind(c.ref); err != nil {
-		fmt.Fprintf(os.Stderr, "error: invalid --ref: %v\n", err)
 		return subcommands.ExitUsageError
 	}
 
@@ -135,6 +180,41 @@ func (c *checkpointCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...any) su
 		origin = signer.Name
 	}
 
+	// The two modes read different policy grammars and reach witnesses
+	// differently; see internal/policy/tlog.go.
+	if c.mode == modeTlog {
+		return c.executeTlog(origin, signer)
+	}
+	return c.executeGitCheckpoint(origin, signer)
+}
+
+// executeTlog checkpoints the repository's transparency log.
+func (c *checkpointCmd) executeTlog(origin string, signer *note.Signer) subcommands.ExitStatus {
+	pol, err := policy.FromPath(c.policyPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: loading policy: %v\n", err)
+		return subcommands.ExitFailure
+	}
+	endpoints := make([]string, 0, len(pol.Witnesses))
+	for _, w := range pol.Witnesses {
+		if w.URL != nil {
+			endpoints = append(endpoints, w.URL.String())
+		}
+	}
+	if err := requireGitHubToken(endpoints, c.githubToken); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return subcommands.ExitUsageError
+	}
+	if err := checkpointTlog(c.repoDir, origin, signer, pol, tlogWitnessClient(c.githubToken), c.timeout); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return subcommands.ExitFailure
+	}
+	return subcommands.ExitSuccess
+}
+
+// executeGitCheckpoint signs one ref's checkpoint, collects cosignatures from
+// the policy's witnesses, and stores the result.
+func (c *checkpointCmd) executeGitCheckpoint(origin string, signer *note.Signer) subcommands.ExitStatus {
 	// Load the policy for witnesses and quorum (the log line is not
 	// used on the checkpointer side — the origin knows its own identity).
 	pol, err := policy.Load(c.policyPath)
@@ -151,8 +231,9 @@ func (c *checkpointCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...any) su
 	}
 
 	// Phase 2: Collect cosignatures from witnesses in parallel.
-	// Each witness gets its own 30-second deadline so a hung or slow witness
-	// does not block the command indefinitely.
+	// Each witness gets its own deadline so a hung or slow witness does not
+	// block the command indefinitely.
+	client := witnessClient()
 	type cosigResult struct {
 		policyName string
 		cosigLine  string
@@ -162,14 +243,14 @@ func (c *checkpointCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...any) su
 	ch := make(chan cosigResult, len(witnesses))
 	for _, w := range witnesses {
 		go func(w *policy.Witness) {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 			defer cancel()
 			// Skip witnesses with non-HTTP endpoints.
 			if w.Endpoint != "" && !strings.HasPrefix(w.Endpoint, "http://") && !strings.HasPrefix(w.Endpoint, "https://") {
-				ch <- cosigResult{w.PolicyName, "", fmt.Errorf("unsupported witness transport %q (use checkpoint-request + checkpoint-store for non-HTTP witnesses)", w.Endpoint)}
+				ch <- cosigResult{w.PolicyName, "", fmt.Errorf("unsupported witness transport %q: %s mode reaches witnesses over HTTP only", w.Endpoint, modeGitCheckpoint)}
 				return
 			}
-			line, err := witness.Cosign(ctx, w.Endpoint, ancestry, signed)
+			line, err := witness.Cosign(ctx, client, w.Endpoint, ancestry, signed)
 			ch <- cosigResult{w.PolicyName, line, err}
 		}(w)
 	}
@@ -280,203 +361,79 @@ func assembleAndStoreCheckpoint(repoDir, ref, signedNote string, cosigLines []st
 	return nil
 }
 
-type checkpointRequestCmd struct {
-	ref           string
-	origin        string
-	keyPath       string
-	kmsKey        string
-	repoDir       string
-	outputRequest string
-	outputNote    string
+type logCmd struct {
+	refs    stringSlice
+	repoDir string
+	mode    string
 }
 
-func (*checkpointRequestCmd) Name() string { return "checkpoint-request" }
-func (*checkpointRequestCmd) Synopsis() string {
-	return "Produce an add-checkpoint request body without contacting witnesses"
-}
-func (*checkpointRequestCmd) Usage() string {
-	return `checkpoint-request [flags]:
-  Produce the add-checkpoint request body (ancestry proof + signed
-  checkpoint note) without contacting any witnesses.
+func (*logCmd) Name() string     { return "log" }
+func (*logCmd) Synopsis() string { return "Record refs' current objects in the transparency log" }
+func (*logCmd) Usage() string {
+	return `log [flags]:
+  Record each ref's current object in the repository's transparency log.
 
-  The output can later be submitted to witnesses separately.
+  This is the only command that grows the log. It is local: no key, and no
+  witnesses are contacted. The new entries sit past the stored checkpoint
+  until "git-ratchet checkpoint" has a quorum cosign the log's new head, and
+  until then nothing verifies against them.
+
+  A ref already at its latest logged state is skipped, so running this twice
+  in a row does not grow the log. Pass --ref more than once to record several
+  refs in a single entry batch.
+
+  Only supported with --mode ` + modeTlog + `; ` + modeGitCheckpoint + ` mode has no log.
+
 `
 }
 
-func (c *checkpointRequestCmd) SetFlags(f *flag.FlagSet) {
-	f.StringVar(&c.ref, "ref", "", "Full ref path to checkpoint (e.g. refs/heads/main or refs/tags/v1.0.0) (required)")
-	f.StringVar(&c.origin, "origin", "", "Origin identity for the checkpoint (required for --kms-key, derived from --key if omitted)")
-	f.StringVar(&c.keyPath, "key", "", "Path to origin private key file (required unless --kms-key is set)")
-	f.StringVar(&c.kmsKey, "kms-key", "", "GCP KMS key resource name for remote signing (alternative to --key)")
+func (c *logCmd) SetFlags(f *flag.FlagSet) {
+	f.Var(&c.refs, "ref", "Full ref path to record (e.g. refs/heads/main or refs/tags/v1.0.0), repeatable (required)")
 	f.StringVar(&c.repoDir, "repo", ".", "Path to git repository")
-	f.StringVar(&c.outputRequest, "output-request", "", "Write the full add-checkpoint wire format to this file (required)")
-	f.StringVar(&c.outputNote, "output-note", "", "Write just the signed note to this file (required)")
+	f.StringVar(&c.mode, "mode", modeGitCheckpoint, "Checkpoint format: "+modeGitCheckpoint+" or "+modeTlog)
 }
 
-func (c *checkpointRequestCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...any) subcommands.ExitStatus {
-	if c.ref == "" || c.outputRequest == "" || c.outputNote == "" || (c.keyPath == "" && c.kmsKey == "") {
-		fmt.Fprintln(os.Stderr, "error: --ref, --output-request, --output-note, and one of --key or --kms-key are required")
+func (c *logCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...any) subcommands.ExitStatus {
+	if err := validateMode(c.mode); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return subcommands.ExitUsageError
+	}
+	if c.mode != modeTlog {
+		fmt.Fprintf(os.Stderr, "error: log requires --mode %s: %s mode keeps no log, and its checkpoints "+
+			"are made one ref at a time with `git-ratchet checkpoint --ref`\n", modeTlog, modeGitCheckpoint)
+		return subcommands.ExitUsageError
+	}
+	if len(c.refs) == 0 {
+		fmt.Fprintln(os.Stderr, "error: at least one --ref is required")
 		fmt.Fprint(os.Stderr, c.Usage())
 		return subcommands.ExitUsageError
 	}
-	if c.keyPath != "" && c.kmsKey != "" {
-		fmt.Fprintln(os.Stderr, "error: --key and --kms-key are mutually exclusive")
-		return subcommands.ExitUsageError
+	for _, ref := range c.refs {
+		if _, err := gitutil.ParseRefKind(ref); err != nil {
+			fmt.Fprintf(os.Stderr, "error: invalid --ref %q: %v\n", ref, err)
+			return subcommands.ExitUsageError
+		}
 	}
 
-	if _, err := gitutil.ParseRefKind(c.ref); err != nil {
-		fmt.Fprintf(os.Stderr, "error: invalid --ref: %v\n", err)
-		return subcommands.ExitUsageError
-	}
-
-	if c.kmsKey != "" && c.origin == "" {
-		fmt.Fprintln(os.Stderr, "error: --origin is required when using --kms-key")
-		return subcommands.ExitUsageError
-	}
-
-	// Load the origin signing key.
-	var signer *note.Signer
-	var err error
-	if c.kmsKey != "" {
-		signer, err = note.NewKMSSigner(context.Background(), c.origin, c.kmsKey, note.RoleOrigin)
-	} else {
-		signer, err = note.ReadKeyFile(c.keyPath, note.RoleOrigin)
-	}
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: loading key: %v\n", err)
-		return subcommands.ExitFailure
-	}
-
-	// Use the origin name from the flag, or derive from the key.
-	origin := c.origin
-	if origin == "" {
-		origin = signer.Name
-	}
-
-	// Build the signed checkpoint note and ancestry proof.
-	signed, ancestry, err := buildCheckpointRequest(c.repoDir, c.ref, origin, signer)
-	if err != nil {
+	if err := logRefsTlog(c.repoDir, c.refs); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return subcommands.ExitFailure
 	}
-
-	// Assemble wire-format request: ancestry lines, empty line, signed note.
-	var wireFormat strings.Builder
-	for _, line := range ancestry {
-		wireFormat.WriteString(line)
-		wireFormat.WriteString("\n")
-	}
-	wireFormat.WriteString("\n")
-	wireFormat.WriteString(signed)
-	request := wireFormat.String()
-
-	// Write outputs.
-	if err := os.WriteFile(c.outputRequest, []byte(request), 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "error: writing request to %s: %v\n", c.outputRequest, err)
-		return subcommands.ExitFailure
-	}
-	if err := os.WriteFile(c.outputNote, []byte(signed), 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "error: writing note to %s: %v\n", c.outputNote, err)
-		return subcommands.ExitFailure
-	}
-
 	return subcommands.ExitSuccess
 }
 
-// stringSlice is a flag.Value that collects repeated --cosig flags.
+// stringSlice is a flag.Value that collects a repeated flag's values.
 type stringSlice []string
 
 func (s *stringSlice) String() string     { return strings.Join(*s, ",") }
 func (s *stringSlice) Set(v string) error { *s = append(*s, v); return nil }
 func (s *stringSlice) Get() any           { return []string(*s) }
 
-type checkpointStoreCmd struct {
-	ref        string
-	policyPath string
-	notePath   string
-	cosigPaths stringSlice
-	repoDir    string
-}
-
-func (*checkpointStoreCmd) Name() string { return "checkpoint-store" }
-func (*checkpointStoreCmd) Synopsis() string {
-	return "Assemble and store a cosigned checkpoint from files"
-}
-func (*checkpointStoreCmd) Usage() string {
-	return `checkpoint-store [flags]:
-  Assemble a cosigned checkpoint from a signed note and cosignature files.
-
-  Reads the signed note produced by checkpoint-request, appends each cosignature
-  from the --cosig files, verifies the assembled checkpoint against the policy,
-  and stores it as a Git ref.
-
-  This command is intended for non-HTTP witnesses (e.g. github-issue://) where
-  cosignatures are collected out-of-band.
-
-`
-}
-
-func (c *checkpointStoreCmd) SetFlags(f *flag.FlagSet) {
-	f.StringVar(&c.ref, "ref", "", "Full ref path to checkpoint (e.g. refs/heads/main or refs/tags/v1.0.0) (required)")
-	f.StringVar(&c.policyPath, "policy", "", "Path to witness policy file (required)")
-	f.StringVar(&c.notePath, "note", "", "Path to the signed note file (required)")
-	f.Var(&c.cosigPaths, "cosig", "Path to a cosignature file (repeatable)")
-	f.StringVar(&c.repoDir, "repo", ".", "Path to git repository")
-}
-
-func (c *checkpointStoreCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...any) subcommands.ExitStatus {
-	if c.ref == "" || c.policyPath == "" || c.notePath == "" {
-		fmt.Fprintln(os.Stderr, "error: --ref, --policy, and --note are required")
-		fmt.Fprint(os.Stderr, c.Usage())
-		return subcommands.ExitUsageError
-	}
-
-	if _, err := gitutil.ParseRefKind(c.ref); err != nil {
-		fmt.Fprintf(os.Stderr, "error: invalid --ref: %v\n", err)
-		return subcommands.ExitUsageError
-	}
-
-	// Read the signed note.
-	noteData, err := os.ReadFile(c.notePath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: reading note file: %v\n", err)
-		return subcommands.ExitFailure
-	}
-	signed := string(noteData)
-
-	// Read each cosignature file.
-	var cosigLines []string
-	for _, cosigPath := range c.cosigPaths {
-		cosigData, err := os.ReadFile(cosigPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: reading cosignature file %s: %v\n", cosigPath, err)
-			return subcommands.ExitFailure
-		}
-		cosigLines = append(cosigLines, strings.TrimSpace(string(cosigData)))
-	}
-
-	// Load the policy.
-	pol, err := policy.Load(c.policyPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: loading policy: %v\n", err)
-		return subcommands.ExitFailure
-	}
-
-	// Assemble cosignatures, verify quorum, and store.
-	if err := assembleAndStoreCheckpoint(c.repoDir, c.ref, signed, cosigLines, pol); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		return subcommands.ExitFailure
-	}
-
-	cpRef := "refs/checkpoints/" + strings.TrimPrefix(c.ref, "refs/")
-	fmt.Printf("checkpoint stored at %s (%d cosignatures assembled)\n", cpRef, len(c.cosigPaths))
-	return subcommands.ExitSuccess
-}
-
 type verifyCmd struct {
 	refs       stringSlice
 	policyPath string
 	repoDir    string
+	mode       string
 }
 
 func (*verifyCmd) Name() string     { return "verify" }
@@ -499,9 +456,14 @@ func (c *verifyCmd) SetFlags(f *flag.FlagSet) {
 	f.Var(&c.refs, "ref", "Full ref path to verify (e.g. refs/heads/main) (required, repeatable)")
 	f.StringVar(&c.policyPath, "policy", "", "Path to witness policy file (required)")
 	f.StringVar(&c.repoDir, "repo", ".", "Path to git repository")
+	f.StringVar(&c.mode, "mode", modeGitCheckpoint, "Checkpoint format: "+modeGitCheckpoint+" or "+modeTlog)
 }
 
 func (c *verifyCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...any) subcommands.ExitStatus {
+	if err := validateMode(c.mode); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return subcommands.ExitUsageError
+	}
 	if c.policyPath == "" || len(c.refs) == 0 {
 		fmt.Fprintln(os.Stderr, "error: --policy and at least one --ref are required")
 		fmt.Fprint(os.Stderr, c.Usage())
@@ -515,30 +477,7 @@ func (c *verifyCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...any) subcom
 		}
 	}
 
-	// Load the policy.
-	pol, err := policy.Load(c.policyPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: loading policy: %v\n", err)
-		return subcommands.ExitFailure
-	}
-
-	refs := []string(c.refs)
-
-	// Verify refs in parallel.
-	type verifyResult struct {
-		ref string
-		err error
-	}
-	results := make([]verifyResult, len(refs))
-	var wg sync.WaitGroup
-	for i, ref := range refs {
-		wg.Add(1)
-		go func(i int, ref string) {
-			defer wg.Done()
-			results[i] = verifyResult{ref, verifySingleRef(c.repoDir, ref, pol)}
-		}(i, ref)
-	}
-	wg.Wait()
+	results := verifyRefs(c.repoDir, []string(c.refs), c.policyPath, c.mode)
 
 	failed := 0
 	for _, r := range results {
@@ -550,10 +489,69 @@ func (c *verifyCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...any) subcom
 		}
 	}
 	if failed > 0 {
-		fmt.Fprintf(os.Stderr, "\n%d of %d refs failed verification\n", failed, len(refs))
+		fmt.Fprintf(os.Stderr, "\n%d of %d refs failed verification\n", failed, len(c.refs))
 		return subcommands.ExitFailure
 	}
 	return subcommands.ExitSuccess
+}
+
+// verifyResult pairs a ref with the outcome of verifying it.
+type verifyResult struct {
+	ref string
+	err error
+}
+
+// verifyRefs verifies each ref against the policy in the given mode.
+//
+// The two modes parallelise differently. A git-checkpoint verification is
+// independent per ref, so those run concurrently. A tlog verification shares
+// one log: its checkpoint is verified once up front — a failure there fails
+// every ref — and the per-ref walks then run against that single verified log.
+func verifyRefs(repoDir string, refs []string, policyPath string, mode string) []verifyResult {
+	results := make([]verifyResult, len(refs))
+
+	if mode == modeTlog {
+		l, err := tlogLogFromPolicy(repoDir, policyPath)
+		if err != nil {
+			for i, ref := range refs {
+				results[i] = verifyResult{ref, err}
+			}
+			return results
+		}
+		for i, ref := range refs {
+			results[i] = verifyResult{ref, verifySingleRefTlog(repoDir, ref, l)}
+		}
+		return results
+	}
+
+	pol, err := policy.Load(policyPath)
+	if err != nil {
+		for i, ref := range refs {
+			results[i] = verifyResult{ref, fmt.Errorf("loading policy: %w", err)}
+		}
+		return results
+	}
+
+	var wg sync.WaitGroup
+	for i, ref := range refs {
+		wg.Add(1)
+		go func(i int, ref string) {
+			defer wg.Done()
+			results[i] = verifyResult{ref, verifySingleRef(repoDir, ref, pol)}
+		}(i, ref)
+	}
+	wg.Wait()
+	return results
+}
+
+// tlogLogFromPolicy loads a tlog-policy and returns the checkpointed part of
+// the repository's log under it.
+func tlogLogFromPolicy(repoDir, policyPath string) (*gitlog.Log, error) {
+	tpol, err := policy.FromPath(policyPath)
+	if err != nil {
+		return nil, fmt.Errorf("loading policy: %w", err)
+	}
+	return checkpointedLog(repoDir, tpol)
 }
 
 // verifySingleRef verifies a single ref's checkpoint against the policy.
@@ -624,6 +622,7 @@ type auditCmd struct {
 	refs       stringSlice
 	policyPath string
 	repoDir    string
+	mode       string
 }
 
 func (*auditCmd) Name() string     { return "audit" }
@@ -652,9 +651,14 @@ func (c *auditCmd) SetFlags(f *flag.FlagSet) {
 	f.Var(&c.refs, "ref", "Full ref path to verify (e.g. refs/heads/main) (required, repeatable)")
 	f.StringVar(&c.policyPath, "policy", "", "Path to witness policy file (required)")
 	f.StringVar(&c.repoDir, "repo", ".", "Path to git repository")
+	f.StringVar(&c.mode, "mode", modeGitCheckpoint, "Checkpoint format: "+modeGitCheckpoint+" or "+modeTlog)
 }
 
 func (c *auditCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...any) subcommands.ExitStatus {
+	if err := validateMode(c.mode); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return subcommands.ExitUsageError
+	}
 	if c.policyPath == "" || len(c.refs) == 0 {
 		fmt.Fprintln(os.Stderr, "error: --policy and at least one --ref are required")
 		fmt.Fprint(os.Stderr, c.Usage())
@@ -681,26 +685,7 @@ func (c *auditCmd) Execute(_ context.Context, f *flag.FlagSet, _ ...any) subcomm
 
 	// Phase 2: git-ratchet verify — check all refs.
 	fmt.Println("Running checkpoint verification...")
-	pol, err := policy.Load(c.policyPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: loading policy: %v\n", err)
-		return subcommands.ExitUsageError
-	}
-	refs := []string(c.refs)
-	type verifyResult struct {
-		ref string
-		err error
-	}
-	results := make([]verifyResult, len(refs))
-	var wg sync.WaitGroup
-	for i, ref := range refs {
-		wg.Add(1)
-		go func(i int, ref string) {
-			defer wg.Done()
-			results[i] = verifyResult{ref, verifySingleRef(c.repoDir, ref, pol)}
-		}(i, ref)
-	}
-	wg.Wait()
+	results := verifyRefs(c.repoDir, []string(c.refs), c.policyPath, c.mode)
 	for _, r := range results {
 		if r.err != nil {
 			fmt.Fprintf(os.Stderr, "FAIL verify %s: %v\n", r.ref, r.err)

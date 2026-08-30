@@ -19,20 +19,32 @@ go_library(
     srcs = [
         "kms.go",
         "note.go",
+        "tlog.go",
     ],
     importpath = "github.com/project-oak/git-ratchet/internal/note",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/tlog",
+        "@com_github_transparency_dev_formats//note",
         "@com_google_cloud_go_kms//apiv1",
         "@com_google_cloud_go_kms//apiv1/kmspb",
         "@io_filippo_mldsa//:mldsa",
         "@org_golang_google_protobuf//types/known/wrapperspb",
+        "@org_golang_x_mod//sumdb/note",
     ],
 )
 
 go_test(
     name = "note_test",
-    srcs = ["note_test.go"],
+    srcs = [
+        "note_test.go",
+        "tlog_test.go",
+    ],
     embed = [":note"],
-    deps = ["@io_filippo_mldsa//:mldsa"],
+    deps = [
+        "//internal/tlog",
+        "@com_github_transparency_dev_formats//log",
+        "@com_github_transparency_dev_formats//note",
+        "@io_filippo_mldsa//:mldsa",
+    ],
 )

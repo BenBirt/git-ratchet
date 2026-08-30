@@ -128,9 +128,11 @@ func Load(path string) (*Policy, error) {
 			if err != nil {
 				return nil, fmt.Errorf("log vkey: %w", err)
 			}
-			// Origin keys must be Ed25519Origin (0x01) or MLDSA44 (0x06).
-			if sigType != note.Ed25519Origin && sigType != note.MLDSA44 {
-				return nil, fmt.Errorf("log vkey must use origin key type (0x01 or 0x06), got 0x%02x", sigType)
+			// Origin keys must be Ed25519Origin (0x01). ML-DSA-44 (0x06)
+			// denotes a construction that is defined only over a
+			// tlog-checkpoint; see internal/note/tlog.go.
+			if sigType != note.Ed25519Origin {
+				return nil, fmt.Errorf("log vkey must use origin key type (0x01), got 0x%02x", sigType)
 			}
 			p.LogName = name
 			p.LogKey = key
@@ -161,9 +163,10 @@ func Load(path string) (*Policy, error) {
 			if err != nil {
 				return nil, fmt.Errorf("witness %s vkey: %w", policyName, err)
 			}
-			// Cosigner keys must be Ed25519Cosigner (0x04) or MLDSA44 (0x06).
-			if sigType != note.Ed25519Cosigner && sigType != note.MLDSA44 {
-				return nil, fmt.Errorf("witness %s vkey must use cosigner key type (0x04 or 0x06), got 0x%02x", policyName, sigType)
+			// Cosigner keys must be Ed25519Cosigner (0x04), for the same
+			// reason as origin keys above.
+			if sigType != note.Ed25519Cosigner {
+				return nil, fmt.Errorf("witness %s vkey must use cosigner key type (0x04), got 0x%02x", policyName, sigType)
 			}
 			w := &Witness{
 				PolicyName: policyName,
@@ -316,7 +319,7 @@ func (p *Policy) VerifyQuorum(body string, sigLines []string) error {
 			if len(raw) < 4 || !bytes.Equal(raw[:4], w.keyHash[:]) {
 				continue
 			}
-			if err := note.VerifyCosignature(body, line, w.Key, w.SigType, w.SignerName); err == nil {
+			if err := note.VerifyCosignature(body, line, w.Key, w.SigType); err == nil {
 				witnessed[w.SignerName] = true
 			}
 			break

@@ -99,11 +99,11 @@ func TestCheckpointBasic(t *testing.T) {
 		t.Errorf("origin signature invalid: %v", err)
 	}
 
-	witnessName, witnessSigType, witnessPub, err := note.ParseVKey(witnessKey.VKey())
+	_, witnessSigType, witnessPub, err := note.ParseVKey(witnessKey.VKey())
 	if err != nil {
 		t.Fatalf("parsing witness vkey: %v", err)
 	}
-	if err := note.VerifyCosignature(body, sigLines[1], witnessPub, witnessSigType, witnessName); err != nil {
+	if err := note.VerifyCosignature(body, sigLines[1], witnessPub, witnessSigType); err != nil {
 		t.Errorf("witness cosignature invalid: %v", err)
 	}
 }
