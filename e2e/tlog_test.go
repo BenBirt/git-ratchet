@@ -52,11 +52,19 @@ type tlogFixture struct {
 
 func newTlogFixture(t *testing.T) *tlogFixture {
 	t.Helper()
+	return newTlogFixtureWithKeys(t, inote.Ed25519Origin, inote.Ed25519Cosigner)
+}
+
+// newTlogFixtureWithKeys builds the fixture with keys of the given algorithms.
+// tlog mode accepts an ML-DSA-44 key in either role, so the combination a
+// post-quantum deployment runs is exercised alongside the Ed25519 one.
+func newTlogFixtureWithKeys(t *testing.T, originType, witnessType inote.SigType) *tlogFixture {
+	t.Helper()
 
 	f := &tlogFixture{
 		ratchetBin: mustFindBinary(t),
-		originKey:  mustGenerateKey(t, "test-origin", inote.Ed25519Origin, inote.RoleOrigin),
-		witnessKey: mustGenerateKey(t, "test-witness", inote.Ed25519Cosigner, inote.RoleCosigner),
+		originKey:  mustGenerateKey(t, "test-origin", originType, inote.RoleOrigin),
+		witnessKey: mustGenerateKey(t, "test-witness", witnessType, inote.RoleCosigner),
 	}
 	f.repoDir = initTestRepo(t)
 
@@ -658,7 +666,20 @@ func startIssueWitness(t *testing.T, originKey, witnessKey *inote.Signer) string
 // git-ratchet's own transport, with no decomposed workflow: the checkpoint
 // command opens the issue, waits for the reply and stores the result.
 func TestTlogIssueWitness(t *testing.T) {
-	f := newTlogFixture(t)
+	testTlogIssueWitness(t, newTlogFixture(t))
+}
+
+// TestTlogIssueWitnessMLDSA runs the same exchange with ML-DSA-44 on both
+// sides. signed-note gives 0x06 to the timestamped cosignature construction
+// and nothing to a plain ML-DSA note signature, so a log signing its own
+// checkpoint uses the byte a witness uses; this covers that both ends read it
+// the same way.
+func TestTlogIssueWitnessMLDSA(t *testing.T) {
+	testTlogIssueWitness(t, newTlogFixtureWithKeys(t, inote.MLDSA44, inote.MLDSA44))
+}
+
+func testTlogIssueWitness(t *testing.T, f *tlogFixture) {
+	t.Helper()
 	api := startIssueWitness(t, f.originKey, f.witnessKey)
 
 	f.policyPath = writeTlogPolicyFile(t, f.repoDir, f.originKey, f.witnessKey,
