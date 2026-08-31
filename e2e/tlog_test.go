@@ -206,6 +206,77 @@ func (f *tlogFixture) verify(t *testing.T, refs ...string) (string, error) {
 	return string(out), err
 }
 
+// audit runs git-ratchet audit in tlog mode, returning its output.
+func (f *tlogFixture) audit(t *testing.T, refs ...string) (string, error) {
+	t.Helper()
+	args := []string{"audit", "--mode", "tlog", "--repo", f.repoDir, "--policy", f.policyPath}
+	for _, ref := range refs {
+		args = append(args, "--ref", ref)
+	}
+	out, err := exec.Command(f.ratchetBin, args...).CombinedOutput()
+	return string(out), err
+}
+
+// TestTlogAudit covers the three checks audit combines, against a log that is
+// in good order: the object database, the ref's checkpoint, and the absence of
+// replace refs.
+func TestTlogAudit(t *testing.T) {
+	f := newTlogFixture(t)
+	makeCommit(t, f.repoDir, "first commit")
+	f.logAndCheckpoint(t, "refs/heads/main")
+
+	out, err := f.audit(t, "refs/heads/main")
+	if err != nil {
+		t.Fatalf("audit failed: %v\n%s", err, out)
+	}
+	for _, want := range []string{"ok   fsck", "ok   verify refs/heads/main", "ok   replace-refs", "all checks passed"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("audit output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestTlogAuditRefAheadOfLog covers the case audit exists to catch: a ref
+// carrying commits the witnessed log does not cover. fsck passes -- the
+// objects are well-formed -- and verification is what fails.
+func TestTlogAuditRefAheadOfLog(t *testing.T) {
+	f := newTlogFixture(t)
+	makeCommit(t, f.repoDir, "first commit")
+	f.logAndCheckpoint(t, "refs/heads/main")
+	makeCommit(t, f.repoDir, "unlogged commit")
+
+	out, err := f.audit(t, "refs/heads/main")
+	if err == nil {
+		t.Fatalf("audit passed on a ref ahead of the log:\n%s", out)
+	}
+	if !strings.Contains(out, "FAIL verify refs/heads/main") {
+		t.Errorf("expected a verify failure:\n%s", out)
+	}
+	if !strings.Contains(out, "ok   fsck") {
+		t.Errorf("expected fsck to pass, the objects being well-formed:\n%s", out)
+	}
+}
+
+// TestTlogAuditReplaceRef covers the third check. A replace ref substitutes
+// one object for another everywhere git reads it, so a log that commits to
+// the original no longer says what the repository shows.
+func TestTlogAuditReplaceRef(t *testing.T) {
+	f := newTlogFixture(t)
+	makeCommit(t, f.repoDir, "first commit")
+	first := strings.TrimSpace(runOutput(t, f.repoDir, "git", "rev-parse", "HEAD"))
+	second := makeCommit(t, f.repoDir, "second commit")
+	f.logAndCheckpoint(t, "refs/heads/main")
+	run(t, f.repoDir, "git", "update-ref", "refs/replace/"+first, second)
+
+	out, err := f.audit(t, "refs/heads/main")
+	if err == nil {
+		t.Fatalf("audit passed with a replace ref present:\n%s", out)
+	}
+	if !strings.Contains(out, "FAIL replace-refs") {
+		t.Errorf("expected a replace-refs failure:\n%s", out)
+	}
+}
+
 // TestTlogIntegration walks the happy path: successive fast-forward commits are
 // logged, cosigned, and verify cleanly.
 func TestTlogIntegration(t *testing.T) {
