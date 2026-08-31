@@ -16,8 +16,6 @@ package e2e
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -482,18 +480,15 @@ func gitEnv(t *testing.T, dir string, env []string, args ...string) string {
 	return string(out)
 }
 
-// mustSkey renders a cosigner key in the "PRIVATE+KEY+..." encoding the
-// formats package parses, which is what the reference witness signs with.
+// mustSkey returns a key in the C2SP signed-note private key encoding, which
+// is what the reference witness signs with.
 func mustSkey(t *testing.T, s *inote.Signer) string {
 	t.Helper()
-	name, sigType, pub, err := inote.ParseVKey(s.VKey())
+	skey, err := s.SKey()
 	if err != nil {
-		t.Fatalf("parsing vkey: %v", err)
+		t.Fatalf("rendering private key: %v", err)
 	}
-	hash := inote.KeyHash(name, pub, sigType)
-	key := append([]byte{byte(sigType)}, s.Seed()...)
-	return fmt.Sprintf("PRIVATE+KEY+%s+%08x+%s",
-		name, binary.BigEndian.Uint32(hash[:]), base64.StdEncoding.EncodeToString(key))
+	return skey
 }
 
 // TestTlogUnwitnessedEntriesAreIgnored covers the trust boundary end to end.

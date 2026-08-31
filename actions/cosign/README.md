@@ -12,7 +12,7 @@ This action should be triggered by `issues: opened` events.
 
 | Name | Required | Description |
 |------|----------|-------------|
-| `witness-key` | Yes | Witness Ed25519 private key file contents (vkey + seed) |
+| `witness-key` | Yes | Witness private key file contents, as written by `genkey` |
 
 ## What It Does
 

@@ -17,7 +17,6 @@
 package e2e
 
 import (
-	"encoding/base64"
 	"fmt"
 	"net"
 	"os"
@@ -426,8 +425,11 @@ func makeCommit(t *testing.T, dir, msg string) string {
 func writeKeyFile(t *testing.T, dir string, s *note.Signer) string {
 	t.Helper()
 	p := filepath.Join(dir, "origin.key")
-	content := s.VKey() + "\n" + base64.StdEncoding.EncodeToString(s.Seed()) + "\n"
-	if err := os.WriteFile(p, []byte(content), 0600); err != nil {
+	skey, err := s.SKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(skey+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	return p
@@ -435,8 +437,11 @@ func writeKeyFile(t *testing.T, dir string, s *note.Signer) string {
 
 func mustWriteKey(t *testing.T, path string, s *note.Signer) {
 	t.Helper()
-	content := s.VKey() + "\n" + base64.StdEncoding.EncodeToString(s.Seed()) + "\n"
-	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+	skey, err := s.SKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(skey+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 }
