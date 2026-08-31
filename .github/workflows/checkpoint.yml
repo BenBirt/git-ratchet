@@ -28,6 +28,7 @@ jobs:
     steps:
       - uses: project-oak/git-ratchet/actions/checkpoint@main
         with:
+          mode: tlog
           ref: ${{ github.ref }}
           origin-key: ${{ secrets.ORIGIN_KEY }}
           policy: ratchet-checkpoint.policy

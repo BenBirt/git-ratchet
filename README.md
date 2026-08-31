@@ -249,7 +249,8 @@ git-ratchet uses itself to protect its own `main` branch and release tags. Every
 The witness policy is in [`ratchet-checkpoint.policy`](ratchet-checkpoint.policy). Anyone can verify the integrity of this repository:
 
 ```bash
-git-ratchet verify --policy ratchet-checkpoint.policy --ref refs/heads/main
+git fetch origin 'refs/ratchet/log:refs/ratchet/log'
+git-ratchet verify --mode tlog --policy ratchet-checkpoint.policy --ref refs/heads/main
 ```
 
 ## Disclaimer
