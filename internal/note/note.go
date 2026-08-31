@@ -177,6 +177,23 @@ func (s *Signer) VKey() string {
 	return FormatVKey(s.Name, s.pub, s.SigType)
 }
 
+// SKey returns the signer's private key in the C2SP signed-note encoding:
+//
+//	PRIVATE+KEY+<name>+<key hash>+<base64 of the algorithm byte and the seed>
+//
+// This is what github.com/transparency-dev/formats parses, so a key written
+// this way is read straight into a formats signer with nothing in between.
+//
+// A KMS-backed signer holds no key material locally and has no SKey.
+func (s *Signer) SKey() (string, error) {
+	if len(s.seed) == 0 {
+		return "", fmt.Errorf("signer %q has no local key material", s.Name)
+	}
+	key := append([]byte{byte(s.SigType)}, s.seed...)
+	return fmt.Sprintf("PRIVATE+KEY+%s+%08x+%s",
+		s.Name, binary.BigEndian.Uint32(s.hash[:]), base64.StdEncoding.EncodeToString(key)), nil
+}
+
 // Seed returns the 32-byte seed.
 func (s *Signer) Seed() []byte {
 	return s.seed
@@ -447,41 +464,65 @@ func pubKeyBytes(pub crypto.PublicKey) []byte {
 	}
 }
 
-// Key file format:
-//   Line 1: vkey string (name+hexID+base64(typeByte||pubkey))
-//   Line 2: base64-encoded 32-byte seed
-
-// ReadKeyData parses a signer from key data bytes (2 lines: vkey and base64 seed).
+// ReadKeyData parses a signer from the C2SP signed-note private key encoding;
+// see [Signer.SKey].
 // The role is determined by the caller (origin vs cosigner).
 func ReadKeyData(data []byte, role KeyRole) (*Signer, error) {
-	lines := strings.SplitN(strings.TrimSpace(string(data)), "\n", 2)
-	if len(lines) != 2 {
-		return nil, fmt.Errorf("key file must have 2 lines: vkey and base64 seed")
+	skey := strings.TrimSpace(string(data))
+	rest, ok := strings.CutPrefix(skey, "PRIVATE+KEY+")
+	if !ok {
+		return nil, fmt.Errorf("not a private key: want %q", "PRIVATE+KEY+<name>+<hash>+<base64>")
+	}
+	// Split from the left and take everything after the key hash as the key
+	// material: base64's alphabet includes "+", so only the leading fields can
+	// be delimited. A name may not contain "+", as in a vkey.
+	parts := strings.SplitN(rest, "+", 3)
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("malformed private key: want %q", "PRIVATE+KEY+<name>+<hash>+<base64>")
+	}
+	name := parts[0]
+	if name == "" {
+		return nil, fmt.Errorf("malformed private key: no name")
 	}
 
-	// Parse the vkey to get name, sigType, and public key.
-	name, sigType, _, err := ParseVKey(strings.TrimSpace(lines[0]))
+	key, err := base64.StdEncoding.DecodeString(parts[2])
 	if err != nil {
-		return nil, fmt.Errorf("parsing vkey: %w", err)
+		return nil, fmt.Errorf("decoding private key: %w", err)
+	}
+	if len(key) < 2 {
+		return nil, fmt.Errorf("malformed private key: no key material")
+	}
+	sigType, seed := SigType(key[0]), key[1:]
+
+	// The algorithm byte says what the key is for, so a key used in the wrong
+	// role is rejected rather than reinterpreted. ML-DSA-44 is the exception:
+	// signed-note assigns 0x06 to the timestamped cosignature construction and
+	// nothing to a plain ML-DSA note signature, so a log signing its own
+	// checkpoint uses the same byte a witness does.
+	switch sigType {
+	case Ed25519Origin:
+		if role != RoleOrigin {
+			return nil, fmt.Errorf("key %q is an origin key, not a cosigner key", name)
+		}
+	case Ed25519Cosigner:
+		if role != RoleCosigner {
+			return nil, fmt.Errorf("key %q is a cosigner key, not an origin key", name)
+		}
+	case MLDSA44:
+	default:
+		return nil, fmt.Errorf("unsupported signature type: 0x%02x", sigType)
 	}
 
-	seed, err := base64.StdEncoding.DecodeString(strings.TrimSpace(lines[1]))
+	signer, err := NewSigner(name, seed, sigType, role)
 	if err != nil {
-		return nil, fmt.Errorf("decoding seed: %w", err)
+		return nil, err
 	}
-
-	// For ML-DSA-44, use the ML-DSA sigType regardless of the caller-specified role.
-	// For Ed25519, select the correct sigType based on role.
-	if sigType == MLDSA44 {
-		return NewSigner(name, seed, MLDSA44, role)
+	// The key hash is derived from the name and the public key, so a mismatch
+	// means the file was edited rather than regenerated.
+	if want := fmt.Sprintf("%08x", binary.BigEndian.Uint32(signer.hash[:])); parts[1] != want {
+		return nil, fmt.Errorf("key hash %s does not match key %q: want %s", parts[1], name, want)
 	}
-	// Ed25519: pick the correct type byte based on role.
-	if role == RoleCosigner {
-		sigType = Ed25519Cosigner
-	} else {
-		sigType = Ed25519Origin
-	}
-	return NewSigner(name, seed, sigType, role)
+	return signer, nil
 }
 
 // ReadKeyFile reads a signer from a key file.

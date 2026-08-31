@@ -16,7 +16,6 @@
 package main
 
 import (
-	"encoding/base64"
 	"flag"
 	"fmt"
 	"log"
@@ -70,8 +69,12 @@ func main() {
 	}
 
 	vkey := signer.VKey()
-	seed := base64.StdEncoding.EncodeToString(signer.Seed())
+	skey, err := signer.SKey()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
 
-	fmt.Printf("%s\n%s\n", vkey, seed)
+	fmt.Printf("%s\n", skey)
 	fmt.Fprintf(os.Stderr, "VKey: %s\n", vkey)
 }

@@ -16,7 +16,6 @@ package note
 
 import (
 	"encoding/base64"
-	"encoding/binary"
 	"fmt"
 	"strconv"
 
@@ -37,28 +36,6 @@ import (
 // Key hashes and verifier keys are encoded identically here and in formats, so
 // they pass between the two unconverted.
 
-// skeyForFormats renders a signer's private key in the "PRIVATE+KEY+..."
-// encoding the formats package parses.
-//
-// TODO: migrate the on-disk key format to this encoding, so keys can be read
-// straight into a formats signer, and delete this shim.
-func skeyForFormats(s *Signer) (string, error) {
-	switch s.SigType {
-	case Ed25519Origin, Ed25519Cosigner, MLDSA44:
-	default:
-		return "", fmt.Errorf("unsupported signature type: 0x%02x", s.SigType)
-	}
-	if len(s.seed) == 0 {
-		// A KMS-backed signer holds no key material locally, so it cannot be
-		// rendered as a private key at all. Ed25519 keys avoid this path
-		// entirely; see SignTlogCheckpoint.
-		return "", fmt.Errorf("signer %q has no local key material", s.Name)
-	}
-	key := append([]byte{byte(s.SigType)}, s.seed...)
-	return fmt.Sprintf("PRIVATE+KEY+%s+%08x+%s",
-		s.Name, binary.BigEndian.Uint32(s.hash[:]), base64.StdEncoding.EncodeToString(key)), nil
-}
-
 // TlogCosigner returns a signer that cosigns tlog-checkpoints with this key,
 // for handing to a witness implementation that takes note signers.
 func TlogCosigner(s *Signer) (sumdbnote.Signer, error) {
@@ -72,7 +49,7 @@ func TlogCosigner(s *Signer) (sumdbnote.Signer, error) {
 // tlog-checkpoint note body according to the key's algorithm: a plain note
 // signature for 0x01, and the timestamped cosigned_message for 0x04 and 0x06.
 func tlogSigner(s *Signer) (sumdbnote.Signer, error) {
-	skey, err := skeyForFormats(s)
+	skey, err := s.SKey()
 	if err != nil {
 		return nil, err
 	}

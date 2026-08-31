@@ -22,7 +22,7 @@ cosign \
 |------|----------|-------------|
 | `--request` | Yes | Path to the add-checkpoint request file. Uses the same wire format as the HTTP `POST /add-checkpoint` body: base64-encoded commit objects (ancestry proof), an empty line separator, then the signed checkpoint note. |
 | `--origin-vkeys` | Yes | Path to a file containing trusted origin verifier keys, one per line. Blank lines and lines starting with `#` are ignored. |
-| `--key` | Yes | Path to the witness private key file. The key file format is two lines: the verifier key (vkey) string, followed by the base64-encoded 32-byte seed. |
+| `--key` | Yes | Path to the witness private key file, in the [signed-note] private key encoding (`PRIVATE+KEY+<name>+<key hash>+<base64>`), as written by `genkey`. |
 | `--stored-checkpoint` | No | Path to an existing cosigned checkpoint file. If provided, the cosign binary enforces state transitions (see below). If omitted, any request is accepted (first-checkpoint scenario). |
 
 ### State transition rules
@@ -67,3 +67,5 @@ git-ratchet checkpoint-store \
     --note note.txt \
     --cosig cosig.txt
 ```
+
+[signed-note]: https://c2sp.org/signed-note@v1.0.0

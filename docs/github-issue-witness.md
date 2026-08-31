@@ -163,8 +163,10 @@ bazel run //tools/genkey -- --role=witness --name=<name> [--algo=<algo>] > witne
 
 Where `<algo>` is one of `ed25519` (default) or `mldsa44`. `mldsa44` keys serve
 `tlog` mode only; see [docs/tlog-variant.md](tlog-variant.md).
-This outputs the key content (the vkey followed by the base64-encoded seed) to stdout,
-and prints the verifier key (vkey) to stderr.
+This writes the private key to stdout in the [signed-note] private key encoding
+(`PRIVATE+KEY+...`), and prints the verifier key (vkey) to stderr.
+
+[signed-note]: https://c2sp.org/signed-note@v1.0.0
 
 
 ### 3. Store the key as a secret

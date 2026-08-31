@@ -15,6 +15,7 @@
 package main_test
 
 import (
+	"bytes"
 	"encoding/base64"
 	"os"
 	"os/exec"
@@ -71,56 +72,106 @@ func mustFindBinary(t *testing.T) string {
 	return ""
 }
 
-func TestGenKey_Origin_Ed25519(t *testing.T) {
-	binary := mustFindBinary(t)
+// runGenKey runs genkey and returns its stdout, which is the private key, and
+// its stderr, which carries the vkey for the operator to copy into a policy.
+func runGenKey(t *testing.T, args ...string) (stdout []byte, stderr string) {
+	t.Helper()
 
-	cmd := exec.Command(binary, "--role", "origin", "--algo", "ed25519", "--name", "test-origin")
+	var errBuf bytes.Buffer
+	cmd := exec.Command(mustFindBinary(t), args...)
+	cmd.Stderr = &errBuf
 	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("genkey failed: %v", err)
+		t.Fatalf("genkey failed: %v (stderr: %s)", err, errBuf.String())
 	}
+	return out, errBuf.String()
+}
+
+// checkSKey asserts that genkey wrote a single private key line in the C2SP
+// signed-note encoding, and returns the algorithm byte it carries.
+func checkSKey(t *testing.T, out []byte, name string) note.SigType {
+	t.Helper()
 
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("expected 2 lines in key output, got %d", len(lines))
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 line in key output, got %d", len(lines))
 	}
 
-	vkey := lines[0]
-	seedB64 := lines[1]
+	rest, ok := strings.CutPrefix(lines[0], "PRIVATE+KEY+")
+	if !ok {
+		t.Fatalf("key output is not a private key: %s", lines[0])
+	}
+	// Split from the left and take everything after the key hash as the key
+	// material: base64's alphabet includes "+", so only the leading fields can
+	// be delimited.
+	parts := strings.SplitN(rest, "+", 3)
+	if len(parts) != 3 {
+		t.Fatalf("key output malformed: %s", lines[0])
+	}
+	if parts[0] != name {
+		t.Fatalf("expected key name %s, got %s", name, parts[0])
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{8}$`).MatchString(parts[1]) {
+		t.Fatalf("key hash format invalid: %s", parts[1])
+	}
 
-	if !regexp.MustCompile(`^test-origin\+[0-9a-f]{8}\+.+$`).MatchString(vkey) {
+	key, err := base64.StdEncoding.DecodeString(parts[2])
+	if err != nil {
+		t.Fatalf("decoding private key: %v", err)
+	}
+	// 1 algorithm byte and a 32-byte seed, for both Ed25519 and ML-DSA-44.
+	if len(key) != 33 {
+		t.Fatalf("expected 33 bytes of key material, got %d", len(key))
+	}
+	return note.SigType(key[0])
+}
+
+// checkVKey asserts that the vkey genkey printed to stderr is the one the
+// private key produces, and that it carries a public key of the given size.
+func checkVKey(t *testing.T, stderr, vkey, name string, sigType note.SigType, pubKeySize int) {
+	t.Helper()
+
+	if !regexp.MustCompile(`^` + regexp.QuoteMeta(name) + `\+[0-9a-f]{8}\+.+$`).MatchString(vkey) {
 		t.Fatalf("vkey format invalid: %s", vkey)
 	}
+	if !strings.Contains(stderr, vkey) {
+		t.Fatalf("expected vkey %s on stderr, got: %s", vkey, stderr)
+	}
 
-	parts := strings.SplitN(vkey, "+", 3)
-	data, err := base64.StdEncoding.DecodeString(parts[2])
+	pubName, pubSigType, _, err := note.ParseVKey(vkey)
+	if err != nil {
+		t.Fatalf("note.ParseVKey: %v", err)
+	}
+	if pubName != name {
+		t.Fatalf("expected pubName %s, got %s", name, pubName)
+	}
+	if pubSigType != sigType {
+		t.Fatalf("expected type byte 0x%02x, got 0x%02x", byte(sigType), byte(pubSigType))
+	}
+
+	data, err := base64.StdEncoding.DecodeString(strings.SplitN(vkey, "+", 3)[2])
 	if err != nil {
 		t.Fatalf("decoding vkey data: %v", err)
 	}
+	// 1 algorithm byte and the public key itself.
+	if len(data) != 1+pubKeySize {
+		t.Fatalf("expected %d bytes of vkey data, got %d", 1+pubKeySize, len(data))
+	}
+}
 
-	// 1 byte type + 32 bytes Ed25519 pubkey
-	if len(data) != 33 {
-		t.Fatalf("expected 33 bytes of vkey data, got %d", len(data))
-	}
-	if data[0] != 0x01 {
-		t.Fatalf("expected type byte 0x01, got 0x%02x", data[0])
-	}
+func TestGenKey_Origin_Ed25519(t *testing.T) {
+	out, stderr := runGenKey(t, "--role", "origin", "--algo", "ed25519", "--name", "test-origin")
 
-	seed, err := base64.StdEncoding.DecodeString(seedB64)
-	if err != nil {
-		t.Fatalf("decoding seed base64: %v", err)
-	}
-	if len(seed) != 32 {
-		t.Fatalf("expected 32-byte seed, got %d", len(seed))
+	if sigType := checkSKey(t, out, "test-origin"); sigType != note.Ed25519Origin {
+		t.Fatalf("expected type byte 0x%02x, got 0x%02x", byte(note.Ed25519Origin), byte(sigType))
 	}
 
 	readSigner, err := note.ReadKeyData(out, note.RoleOrigin)
 	if err != nil {
 		t.Fatalf("ReadKeyData: %v", err)
 	}
-	if readSigner.VKey() != vkey {
-		t.Fatalf("round-trip vkey mismatch: got %s, want %s", readSigner.VKey(), vkey)
-	}
+	vkey := readSigner.VKey()
+	checkVKey(t, stderr, vkey, "test-origin", note.Ed25519Origin, 32)
 
 	testBody := "test-origin refs/heads/main\n0123456789abcdef0123456789abcdef01234567\n"
 	signedNote, err := note.Sign(testBody, readSigner)
@@ -132,74 +183,32 @@ func TestGenKey_Origin_Ed25519(t *testing.T) {
 	if err != nil {
 		t.Fatalf("note.ParseSignedNote: %v", err)
 	}
-
-	pubName, sigType, pubKey, err := note.ParseVKey(vkey)
-	if err != nil {
-		t.Fatalf("note.ParseVKey: %v", err)
-	}
-	if pubName != "test-origin" {
-		t.Fatalf("expected pubName test-origin, got %s", pubName)
-	}
-
 	if len(sigLines) != 1 {
 		t.Fatalf("expected 1 signature line, got %d", len(sigLines))
 	}
 
+	_, sigType, pubKey, err := note.ParseVKey(vkey)
+	if err != nil {
+		t.Fatalf("note.ParseVKey: %v", err)
+	}
 	if err := note.VerifySignature(body, sigLines[0], pubKey, sigType); err != nil {
 		t.Fatalf("signature verification failed: %v", err)
 	}
 }
 
 func TestGenKey_Origin_MLDSA(t *testing.T) {
-	binary := mustFindBinary(t)
+	out, stderr := runGenKey(t, "--role", "origin", "--algo", "mldsa44", "--name", "test-origin-pq")
 
-	cmd := exec.Command(binary, "--role", "origin", "--algo", "mldsa44", "--name", "test-origin-pq")
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("genkey failed: %v", err)
-	}
-
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("expected 2 lines in key output, got %d", len(lines))
-	}
-
-	vkey := lines[0]
-	seedB64 := lines[1]
-
-	if !regexp.MustCompile(`^test-origin-pq\+[0-9a-f]{8}\+.+$`).MatchString(vkey) {
-		t.Fatalf("vkey format invalid: %s", vkey)
-	}
-
-	parts := strings.SplitN(vkey, "+", 3)
-	data, err := base64.StdEncoding.DecodeString(parts[2])
-	if err != nil {
-		t.Fatalf("decoding vkey data: %v", err)
-	}
-
-	// 1 byte type (0x06) + 1312 bytes ML-DSA-44 pubkey
-	if len(data) != 1313 {
-		t.Fatalf("expected 1313 bytes of vkey data, got %d", len(data))
-	}
-	if data[0] != 0x06 {
-		t.Fatalf("expected type byte 0x06, got 0x%02x", data[0])
-	}
-
-	seed, err := base64.StdEncoding.DecodeString(seedB64)
-	if err != nil {
-		t.Fatalf("decoding seed base64: %v", err)
-	}
-	if len(seed) != 32 {
-		t.Fatalf("expected 32-byte seed, got %d", len(seed))
+	if sigType := checkSKey(t, out, "test-origin-pq"); sigType != note.MLDSA44 {
+		t.Fatalf("expected type byte 0x%02x, got 0x%02x", byte(note.MLDSA44), byte(sigType))
 	}
 
 	readSigner, err := note.ReadKeyData(out, note.RoleOrigin)
 	if err != nil {
 		t.Fatalf("ReadKeyData: %v", err)
 	}
-	if readSigner.VKey() != vkey {
-		t.Fatalf("round-trip vkey mismatch: got %s, want %s", readSigner.VKey(), vkey)
-	}
+	vkey := readSigner.VKey()
+	checkVKey(t, stderr, vkey, "test-origin-pq", note.MLDSA44, 1312)
 
 	signedNote, err := note.SignTlogCheckpoint(tlogCheckpointBody("test-origin-pq"), readSigner)
 	if err != nil {
@@ -210,15 +219,6 @@ func TestGenKey_Origin_MLDSA(t *testing.T) {
 	if err != nil {
 		t.Fatalf("note.ParseSignedNote: %v", err)
 	}
-
-	pubName, _, _, err := note.ParseVKey(vkey)
-	if err != nil {
-		t.Fatalf("note.ParseVKey: %v", err)
-	}
-	if pubName != "test-origin-pq" {
-		t.Fatalf("expected pubName test-origin-pq, got %s", pubName)
-	}
-
 	if len(sigLines) != 1 {
 		t.Fatalf("expected 1 signature line, got %d", len(sigLines))
 	}
@@ -229,54 +229,18 @@ func TestGenKey_Origin_MLDSA(t *testing.T) {
 }
 
 func TestGenKey_Witness_Ed25519(t *testing.T) {
-	binary := mustFindBinary(t)
+	out, stderr := runGenKey(t, "--role", "witness", "--algo", "ed25519", "--name", "test-witness")
 
-	cmd := exec.Command(binary, "--role", "witness", "--algo", "ed25519", "--name", "test-witness")
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("genkey failed: %v", err)
-	}
-
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("expected 2 lines in key output, got %d", len(lines))
-	}
-
-	vkey := lines[0]
-	seedB64 := lines[1]
-
-	if !regexp.MustCompile(`^test-witness\+[0-9a-f]{8}\+.+$`).MatchString(vkey) {
-		t.Fatalf("vkey format invalid: %s", vkey)
-	}
-
-	parts := strings.SplitN(vkey, "+", 3)
-	data, err := base64.StdEncoding.DecodeString(parts[2])
-	if err != nil {
-		t.Fatalf("decoding vkey data: %v", err)
-	}
-
-	if len(data) != 33 {
-		t.Fatalf("expected 33 bytes of vkey data, got %d", len(data))
-	}
-	if data[0] != 0x04 {
-		t.Fatalf("expected type byte 0x04, got 0x%02x", data[0])
-	}
-
-	seed, err := base64.StdEncoding.DecodeString(seedB64)
-	if err != nil {
-		t.Fatalf("decoding seed base64: %v", err)
-	}
-	if len(seed) != 32 {
-		t.Fatalf("expected 32-byte seed, got %d", len(seed))
+	if sigType := checkSKey(t, out, "test-witness"); sigType != note.Ed25519Cosigner {
+		t.Fatalf("expected type byte 0x%02x, got 0x%02x", byte(note.Ed25519Cosigner), byte(sigType))
 	}
 
 	readSigner, err := note.ReadKeyData(out, note.RoleCosigner)
 	if err != nil {
 		t.Fatalf("ReadKeyData: %v", err)
 	}
-	if readSigner.VKey() != vkey {
-		t.Fatalf("round-trip vkey mismatch: got %s, want %s", readSigner.VKey(), vkey)
-	}
+	vkey := readSigner.VKey()
+	checkVKey(t, stderr, vkey, "test-witness", note.Ed25519Cosigner, 32)
 
 	originSigner, err := note.GenerateKey("test-origin", note.Ed25519Origin, note.RoleOrigin)
 	if err != nil {
@@ -294,73 +258,33 @@ func TestGenKey_Witness_Ed25519(t *testing.T) {
 		t.Fatalf("note.Cosign: %v", err)
 	}
 
-	pubName, sigType, pubKey, err := note.ParseVKey(vkey)
-	if err != nil {
-		t.Fatalf("note.ParseVKey: %v", err)
-	}
-	if pubName != "test-witness" {
-		t.Fatalf("expected pubName test-witness, got %s", pubName)
-	}
-
 	body, err := note.ExtractBody(signedNote)
 	if err != nil {
 		t.Fatalf("note.ExtractBody: %v", err)
 	}
 
+	_, sigType, pubKey, err := note.ParseVKey(vkey)
+	if err != nil {
+		t.Fatalf("note.ParseVKey: %v", err)
+	}
 	if err := note.VerifyCosignature(body, cosigLine, pubKey, sigType); err != nil {
 		t.Fatalf("cosignature verification failed: %v", err)
 	}
 }
 
 func TestGenKey_Witness_MLDSA(t *testing.T) {
-	binary := mustFindBinary(t)
+	out, stderr := runGenKey(t, "--role", "witness", "--algo", "mldsa44", "--name", "test-witness-pq")
 
-	cmd := exec.Command(binary, "--role", "witness", "--algo", "mldsa44", "--name", "test-witness-pq")
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("genkey failed: %v", err)
-	}
-
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("expected 2 lines in key output, got %d", len(lines))
-	}
-
-	vkey := lines[0]
-	seedB64 := lines[1]
-
-	if !regexp.MustCompile(`^test-witness-pq\+[0-9a-f]{8}\+.+$`).MatchString(vkey) {
-		t.Fatalf("vkey format invalid: %s", vkey)
-	}
-
-	parts := strings.SplitN(vkey, "+", 3)
-	data, err := base64.StdEncoding.DecodeString(parts[2])
-	if err != nil {
-		t.Fatalf("decoding vkey data: %v", err)
-	}
-
-	if len(data) != 1313 {
-		t.Fatalf("expected 1313 bytes of vkey data, got %d", len(data))
-	}
-	if data[0] != 0x06 {
-		t.Fatalf("expected type byte 0x06, got 0x%02x", data[0])
-	}
-
-	seed, err := base64.StdEncoding.DecodeString(seedB64)
-	if err != nil {
-		t.Fatalf("decoding seed base64: %v", err)
-	}
-	if len(seed) != 32 {
-		t.Fatalf("expected 32-byte seed, got %d", len(seed))
+	if sigType := checkSKey(t, out, "test-witness-pq"); sigType != note.MLDSA44 {
+		t.Fatalf("expected type byte 0x%02x, got 0x%02x", byte(note.MLDSA44), byte(sigType))
 	}
 
 	readSigner, err := note.ReadKeyData(out, note.RoleCosigner)
 	if err != nil {
 		t.Fatalf("ReadKeyData: %v", err)
 	}
-	if readSigner.VKey() != vkey {
-		t.Fatalf("round-trip vkey mismatch: got %s, want %s", readSigner.VKey(), vkey)
-	}
+	vkey := readSigner.VKey()
+	checkVKey(t, stderr, vkey, "test-witness-pq", note.MLDSA44, 1312)
 
 	originSigner, err := note.GenerateKey("test-origin", note.Ed25519Origin, note.RoleOrigin)
 	if err != nil {
@@ -375,14 +299,6 @@ func TestGenKey_Witness_MLDSA(t *testing.T) {
 	cosigLine, err := note.CosignTlogCheckpoint(signedNote, readSigner)
 	if err != nil {
 		t.Fatalf("note.CosignTlogCheckpoint: %v", err)
-	}
-
-	pubName, _, _, err := note.ParseVKey(vkey)
-	if err != nil {
-		t.Fatalf("note.ParseVKey: %v", err)
-	}
-	if pubName != "test-witness-pq" {
-		t.Fatalf("expected pubName test-witness-pq, got %s", pubName)
 	}
 
 	if err := verifyTlogCheckpoint(note.AppendSignature(signedNote, cosigLine), "test-origin", vkey); err != nil {
