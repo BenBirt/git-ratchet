@@ -17,7 +17,6 @@
 package main_test
 
 import (
-	"encoding/base64"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,8 +37,11 @@ func mustGenerateKey(t *testing.T, name string, sigType note.SigType, role note.
 
 func mustWriteKey(t *testing.T, path string, s *note.Signer) {
 	t.Helper()
-	content := s.VKey() + "\n" + base64.StdEncoding.EncodeToString(s.Seed()) + "\n"
-	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+	skey, err := s.SKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(skey+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 }

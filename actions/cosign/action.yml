@@ -22,7 +22,7 @@ description: >
 
 inputs:
   witness-key:
-    description: 'Witness Ed25519 private key file contents (vkey + seed)'
+    description: 'Witness private key file contents, as written by genkey'
     required: true
 
 runs:

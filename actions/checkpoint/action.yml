@@ -23,7 +23,7 @@ inputs:
     description: 'Full ref path to checkpoint (e.g. refs/heads/main)'
     required: true
   origin-key:
-    description: 'Origin Ed25519 private key file contents (vkey + seed)'
+    description: 'Origin private key file contents, as written by genkey'
     required: true
   policy:
     description: 'Path to the witness policy file (relative to repo root)'

@@ -32,8 +32,11 @@ func writeKeyFile(t *testing.T, path string, s *Signer) {
 	if s.seed == nil {
 		t.Fatal("cannot write key file for KMS-backed signer (no local seed)")
 	}
-	content := s.VKey() + "\n" + base64.StdEncoding.EncodeToString(s.Seed()) + "\n"
-	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+	skey, err := s.SKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(skey+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -336,28 +339,110 @@ func TestKeyFileContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir := t.TempDir()
-	path := filepath.Join(dir, "key")
-	writeKeyFile(t, path, s)
-	data, err := os.ReadFile(path)
+	skey, err := s.SKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("expected 2 lines, got %d", len(lines))
+
+	// The encoding is C2SP signed-note's, which formats parses directly.
+	rest, ok := strings.CutPrefix(skey, "PRIVATE+KEY+")
+	if !ok {
+		t.Fatalf("skey does not start with PRIVATE+KEY+: %q", skey)
 	}
-	// Line 1 should be a valid vkey.
-	if _, _, _, err := ParseVKey(lines[0]); err != nil {
-		t.Errorf("line 1 is not a valid vkey: %v", err)
+	parts := strings.SplitN(rest, "+", 3)
+	if len(parts) != 3 {
+		t.Fatalf("skey has %d fields after the prefix, want 3: %q", len(parts), skey)
 	}
-	// Line 2 should be valid base64.
-	seed, err := base64.StdEncoding.DecodeString(lines[1])
+	if parts[0] != "test.example/log" {
+		t.Errorf("name: got %q, want %q", parts[0], "test.example/log")
+	}
+
+	key, err := base64.StdEncoding.DecodeString(parts[2])
 	if err != nil {
-		t.Errorf("line 2 is not valid base64: %v", err)
+		t.Fatalf("key material is not valid base64: %v", err)
 	}
-	if len(seed) != 32 {
-		t.Errorf("seed length: got %d, want 32", len(seed))
+	if got := SigType(key[0]); got != Ed25519Origin {
+		t.Errorf("algorithm byte: got 0x%02x, want 0x%02x", got, Ed25519Origin)
+	}
+	if len(key)-1 != 32 {
+		t.Errorf("seed length: got %d, want 32", len(key)-1)
+	}
+}
+
+// TestReadKeyDataRejectsWrongRole covers what the encoding now makes possible:
+// the algorithm byte says what a key is for, so a witness key handed to a
+// command that wants an origin key is refused rather than reinterpreted as a
+// different key with the same seed.
+func TestReadKeyDataRejectsWrongRole(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		sigType SigType
+		made    KeyRole
+		readAs  KeyRole
+		wantErr string
+	}{
+		{"origin key read as cosigner", Ed25519Origin, RoleOrigin, RoleCosigner, "is an origin key"},
+		{"cosigner key read as origin", Ed25519Cosigner, RoleCosigner, RoleOrigin, "is a cosigner key"},
+		// ML-DSA-44 is 0x06 in both roles, so neither is refused.
+		{"mldsa origin read as cosigner", MLDSA44, RoleOrigin, RoleCosigner, ""},
+		{"mldsa cosigner read as origin", MLDSA44, RoleCosigner, RoleOrigin, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := GenerateKey("test.example/key", tc.sigType, tc.made)
+			if err != nil {
+				t.Fatal(err)
+			}
+			skey, err := s.SKey()
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = ReadKeyData([]byte(skey), tc.readAs)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected an error containing %q", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %v, want it to contain %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestReadKeyDataMalformed(t *testing.T) {
+	s, err := GenerateKey("test.example/key", Ed25519Origin, RoleOrigin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	skey, err := s.SKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.SplitN(strings.TrimPrefix(skey, "PRIVATE+KEY+"), "+", 3)
+
+	for _, tc := range []struct {
+		name    string
+		skey    string
+		wantErr string
+	}{
+		{"not a private key", s.VKey(), "not a private key"},
+		{"too few fields", "PRIVATE+KEY+name+deadbeef", "malformed private key"},
+		{"no name", "PRIVATE+KEY++deadbeef+AAA=", "no name"},
+		{"bad base64", "PRIVATE+KEY+name+deadbeef+not base64", "decoding private key"},
+		{"renamed key", "PRIVATE+KEY+other+" + parts[1] + "+" + parts[2], "does not match key"},
+		{"wrong hash", "PRIVATE+KEY+" + parts[0] + "+deadbeef+" + parts[2], "does not match key"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := ReadKeyData([]byte(tc.skey), RoleOrigin); err == nil {
+				t.Fatalf("expected an error containing %q", tc.wantErr)
+			} else if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %v, want it to contain %q", err, tc.wantErr)
+			}
+		})
 	}
 }
 

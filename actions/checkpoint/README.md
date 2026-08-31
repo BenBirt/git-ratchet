@@ -31,7 +31,7 @@ ref holds one note rather than a chain, so it has nothing to fast-forward from.
 | Name | Required | Default | Description |
 |------|----------|---------|-------------|
 | `ref` | Yes | — | Full ref path to checkpoint (e.g. `refs/heads/main`). |
-| `origin-key` | Yes | — | Origin Ed25519 private key file contents (vkey + seed). |
+| `origin-key` | Yes | — | Origin private key file contents, as written by `genkey`. |
 | `policy` | Yes | — | Path to the witness policy file (relative to repo root). |
 | `mode` | No | `git-checkpoint` | Checkpoint format: `git-checkpoint` or `tlog`. |
 | `github-token` | No | `github.token` | Token that can open issues on witness repositories, for `github-issue://` witnesses. `tlog` mode only. |
