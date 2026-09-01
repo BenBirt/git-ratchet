@@ -34,24 +34,6 @@ import (
 	"github.com/project-oak/git-ratchet/internal/tlog"
 )
 
-// Checkpoint format modes. See docs/tlog-variant.md for how they differ.
-const (
-	// modeGitCheckpoint stores a signed note per ref, and witnesses enforce
-	// Git ancestry when cosigning it.
-	modeGitCheckpoint = "git-checkpoint"
-	// modeTlog stores a Merkle transparency log in the repository, and
-	// witnesses enforce only that the log grew by appending.
-	modeTlog = "tlog"
-)
-
-// validateMode rejects anything that is not one of the two supported modes.
-func validateMode(mode string) error {
-	if mode != modeGitCheckpoint && mode != modeTlog {
-		return fmt.Errorf("--mode must be %q or %q, got %q", modeGitCheckpoint, modeTlog, mode)
-	}
-	return nil
-}
-
 // logRefsTlog records each ref's current object in the repository's
 // transparency log.
 //
@@ -113,27 +95,6 @@ func logRefsTlog(repoDir string, refs []string) error {
 	}
 	fmt.Printf("logged %d entries to %s (log size %d, %d not yet checkpointed)\n",
 		len(added), gitlog.LogRef, l.Size(), l.Size()-stored)
-	return nil
-}
-
-// checkpointRefFlag validates --ref for the commands that produce a
-// checkpoint. A git-checkpoint covers one ref, so it needs the flag; a tlog
-// checkpoint covers the whole log, whose contents are chosen by git-ratchet
-// log, so a ref passed there asks for something the command will not do.
-func checkpointRefFlag(mode, ref string) error {
-	if mode == modeTlog {
-		if ref != "" {
-			return fmt.Errorf("--ref is not used with --mode %s: a checkpoint covers the whole log, "+
-				"and a ref is recorded in it by `git-ratchet log --mode %s --ref %s`", modeTlog, modeTlog, ref)
-		}
-		return nil
-	}
-	if ref == "" {
-		return fmt.Errorf("--ref is required with --mode %s", modeGitCheckpoint)
-	}
-	if _, err := gitutil.ParseRefKind(ref); err != nil {
-		return fmt.Errorf("invalid --ref: %w", err)
-	}
 	return nil
 }
 
@@ -428,7 +389,7 @@ func logToCheckpoint(repoDir string) (*gitlog.Log, uint64, error) {
 		return nil, 0, fmt.Errorf("opening log: %w", err)
 	}
 	if l.Size() == 0 {
-		return nil, 0, fmt.Errorf("refusing to checkpoint an empty log (hint: git-ratchet log --mode %s --ref <ref>)", modeTlog)
+		return nil, 0, fmt.Errorf("refusing to checkpoint an empty log (hint: git-ratchet log --ref <ref>)")
 	}
 	// Entries reach the log ref by being pushed to it, not only through
 	// git-ratchet log, so the chains are checked again before a quorum is

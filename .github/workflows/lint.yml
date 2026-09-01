@@ -28,9 +28,11 @@ jobs:
     name: Go format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-go@v6.5.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
 
@@ -49,9 +51,11 @@ jobs:
     name: Go mod tidy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-go@v6.5.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
 
@@ -67,9 +71,11 @@ jobs:
     name: Gazelle
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
-      - uses: bazel-contrib/setup-bazel@0.19.0
+      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
         with:
           bazelisk-cache: true
           disk-cache: ${{ github.workflow }}-gazelle
@@ -77,9 +83,16 @@ jobs:
 
       - name: Check BUILD files are up-to-date
         run: |
-          DIFF=$(bazel run //:gazelle -- update -mode diff 2>/dev/null)
-          if [ -n "$DIFF" ]; then
+          # Keep gazelle's own output. Discarding stderr and assigning the diff
+          # to a variable meant that under `bash -e` a non-zero exit killed the
+          # step at the assignment, reporting neither the diff nor the reason.
+          set +e
+          bazel run //:gazelle -- update -mode diff > "${RUNNER_TEMP}/gazelle.diff"
+          status=$?
+          set -e
+          if [ -s "${RUNNER_TEMP}/gazelle.diff" ]; then
             echo "::error::BUILD files are out of date. Run 'bazel run //:gazelle' to regenerate."
-            echo "$DIFF"
+            cat "${RUNNER_TEMP}/gazelle.diff"
             exit 1
           fi
+          exit $status

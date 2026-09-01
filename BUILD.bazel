@@ -47,15 +47,11 @@ go_binary(
 
 go_test(
     name = "git-ratchet_test",
-    srcs = [
-        "checkpoint_test.go",
-        "tlogcmd_test.go",
-    ],
+    srcs = ["tlogcmd_test.go"],
     data = [":git-ratchet"],  # keep
     embed = [":git-ratchet_lib"],
     deps = [
         "//internal/gitlog",
         "//internal/gitutil",
-        "//internal/note",
     ],
 )

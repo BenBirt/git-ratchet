@@ -18,7 +18,6 @@ package gitutil
 
 import (
 	"bytes"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -109,44 +108,6 @@ func ResolveRef(repoDir, ref string) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
-// RemoteURL returns the fetch URL of the "origin" remote.
-func RemoteURL(repoDir string) (string, error) {
-	out, err := Git(repoDir).Run("remote", "get-url", "origin")
-	if err != nil {
-		return "", fmt.Errorf("getting remote URL: %w", err)
-	}
-	return strings.TrimSpace(out), nil
-}
-
-// checkpointRef converts a source ref like "refs/heads/main" or
-// "refs/tags/v1.0" to its checkpoint storage ref, e.g.
-// "refs/checkpoints/heads/main" or "refs/checkpoints/tags/v1.0".
-func checkpointRef(sourceRef string) string {
-	return "refs/checkpoints/" + strings.TrimPrefix(sourceRef, "refs/")
-}
-
-// StoreCheckpoint writes a checkpoint string as a Git blob and points
-// the corresponding checkpoint ref at it.
-// ref must be a full ref path, e.g. "refs/heads/main" or "refs/tags/v1.0".
-func StoreCheckpoint(repoDir, ref, checkpoint string) error {
-	blobHash, err := HashObject(repoDir, checkpoint)
-	if err != nil {
-		return fmt.Errorf("writing checkpoint blob: %w", err)
-	}
-
-	cpRef := checkpointRef(ref)
-	if _, err := Git(repoDir).Run("update-ref", cpRef, blobHash); err != nil {
-		return fmt.Errorf("updating ref %s: %w", cpRef, err)
-	}
-	return nil
-}
-
-// ReadCheckpoint reads the checkpoint blob for a ref.
-// ref must be a full ref path, e.g. "refs/heads/main" or "refs/tags/v1.0".
-func ReadCheckpoint(repoDir, ref string) (string, error) {
-	return Git(repoDir).Run("cat-file", "-p", checkpointRef(ref))
-}
-
 // HashObject writes content to the object database as a blob and returns its
 // hash.
 func HashObject(repoDir, content string) (string, error) {
@@ -187,36 +148,4 @@ func IsAncestor(repoDir, ancestor, descendant string) (bool, error) {
 		return false, err
 	}
 	return true, nil
-}
-
-// GetCommitChain returns a slice of base64-encoded raw Git commit objects
-// representing the path from oldCommit to newCommit (excluding oldCommit,
-// and including newCommit).
-func GetCommitChain(repoDir, oldCommit, newCommit string) ([]string, error) {
-	if oldCommit == newCommit {
-		return nil, nil
-	}
-
-	out, err := Git(repoDir).Run("rev-list", "--reverse", oldCommit+".."+newCommit)
-	if err != nil {
-		return nil, fmt.Errorf("getting rev-list from %s to %s: %w", oldCommit, newCommit, err)
-	}
-
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	var commits []string
-	for _, commitHash := range lines {
-		commitHash = strings.TrimSpace(commitHash)
-		if commitHash == "" {
-			continue
-		}
-		// Get raw commit content.
-		content, err := Git(repoDir).Run("cat-file", "-p", commitHash)
-		if err != nil {
-			return nil, fmt.Errorf("reading commit %s: %w", commitHash, err)
-		}
-		// Format: "commit <size>\n<content>"
-		formatted := fmt.Sprintf("commit %d\n%s", len(content), content)
-		commits = append(commits, base64.StdEncoding.EncodeToString([]byte(formatted)))
-	}
-	return commits, nil
 }

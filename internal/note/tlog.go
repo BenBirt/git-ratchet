@@ -71,7 +71,7 @@ func SignTlogCheckpoint(body string, signer *Signer) (string, error) {
 	switch signer.SigType {
 	case Ed25519Origin:
 		// Sign already emits this construction. It must stay: a KMS-backed
-		// key has no local seed for skeyForFormats to render.
+		// key has no local seed for SKey to render.
 		return Sign(body, signer)
 
 	case MLDSA44:
