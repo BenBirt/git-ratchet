@@ -138,15 +138,6 @@ func newKMSSigner(ctx context.Context, resourceName string) (*kmsSigner, SigType
 		}
 		return &kmsSigner{client: client, resourceName: resourceName, pub: pub}, MLDSA44, nil
 
-	case kmspb.CryptoKeyVersion_PQ_SIGN_ML_DSA_65,
-		kmspb.CryptoKeyVersion_PQ_SIGN_ML_DSA_87,
-		kmspb.CryptoKeyVersion_PQ_SIGN_ML_DSA_44_EXTERNAL_MU,
-		kmspb.CryptoKeyVersion_PQ_SIGN_ML_DSA_65_EXTERNAL_MU,
-		kmspb.CryptoKeyVersion_PQ_SIGN_ML_DSA_87_EXTERNAL_MU:
-		return nil, 0, fmt.Errorf("KMS key algorithm %s is not usable: C2SP signed-note "+
-			"assigns an algorithm identifier to ML-DSA-44 only, so a key of another "+
-			"parameter set cannot be named in a note or a policy", ckv.Algorithm)
-
 	default:
 		return nil, 0, fmt.Errorf("unsupported KMS key algorithm %s: want EC_SIGN_ED25519 or PQ_SIGN_ML_DSA_44", ckv.Algorithm)
 	}
