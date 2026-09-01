@@ -473,6 +473,51 @@ nav button:hover { background: var(--surface-alt); color: var(--text); }
   margin-top: 8px;
   font-style: italic;
 }
+
+/* ---- Phone layer -------------------------------------------------------
+   Everything above is authored for a projector. These rules apply below
+   820px only, so the projected rendering is unaffected. */
+@media (max-width: 820px) {
+  /* Mobile browsers report 100vh as the height without the address bar, so a
+     100vh slide is taller than what is actually on screen. dvh tracks the
+     visible viewport; the vh line stays as the fallback. */
+  body { height: 100vh; height: 100dvh; }
+
+  .s { padding: 28px 20px 88px; }
+  /* Centring a slide taller than the viewport puts its top out of reach.
+     Start at the top and let it scroll instead. */
+  .s.active { justify-content: flex-start; }
+  .s.title-slide { justify-content: center; }
+
+  h1 { font-size: 2.4em; }
+  h2 { font-size: 1.5em; margin-bottom: 0.5em; }
+  h3 { font-size: 1.02em; }
+  p, li { font-size: 0.94em; line-height: 1.55; }
+  .sub { font-size: 1.05em; }
+
+  /* Side-by-side comparisons stack rather than shrink to unreadable columns. */
+  .two-col,
+  .card-grid.cols-2,
+  .card-grid.cols-3 { grid-template-columns: 1fr; gap: 14px; }
+  .invariant { flex-direction: column; gap: 12px; }
+  .flow { gap: 8px; }
+  .flow-arrow { transform: rotate(90deg); }
+
+  .card { padding: 16px; }
+  .threat-box, .safe-box { padding: 16px 18px; }
+  .code-block, .commit-obj { font-size: 0.72em; padding: 14px 16px; }
+
+  /* Touch targets, and room for them under the last line of content. */
+  nav { bottom: 16px; right: 16px; gap: 10px; }
+  nav button, button.home-btn { width: 46px; height: 46px; font-size: 1.2em; }
+  button.home-btn { bottom: 16px; left: 16px; }
+  .counter { bottom: 30px; right: 122px; }
+  .notes-panel { padding: 16px 20px; max-height: 45vh; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .s, .progress, nav button, button.home-btn, .notes-panel { transition: none; }
+}
 </style>
 </head>
 <body>
