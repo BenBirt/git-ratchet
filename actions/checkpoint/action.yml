@@ -28,14 +28,10 @@ inputs:
   policy:
     description: 'Path to the witness policy file (relative to repo root)'
     required: true
-  mode:
-    description: 'Checkpoint format: git-checkpoint or tlog'
-    required: false
-    default: 'git-checkpoint'
   github-token:
     description: >
       GitHub token that can open issues on witness repositories, for
-      github-issue:// witnesses. Used in tlog mode only.
+      github-issue:// witnesses.
     required: false
     default: ${{ github.token }}
   version:
@@ -61,65 +57,46 @@ runs:
         tool: git-ratchet
         version: ${{ inputs.version }}
 
-    # Whichever ref the mode stores its state in has to be present before the
-    # command runs: git-checkpoint compares against the last checkpoint for
-    # this ref, tlog appends to the log. Neither exists on a first run.
-    - name: Fetch checkpoint refs
-      if: inputs.mode != 'tlog'
-      shell: bash
-      run: git fetch origin 'refs/checkpoints/*:refs/checkpoints/*' 2>/dev/null || true
-
+    # The log has to be present before a ref can be recorded in it. It does
+    # not exist on a first run.
     - name: Fetch log ref
-      if: inputs.mode == 'tlog'
       shell: bash
       run: git fetch origin 'refs/ratchet/log:refs/ratchet/log' 2>/dev/null || true
 
-    - name: Checkpoint
+    - name: Record the ref in the log
+      shell: bash
+      run: git-ratchet log --ref "${{ inputs.ref }}"
+
+    # Push the entry before asking anyone to cosign it. The entry is the
+    # durable record of where the ref pointed; a witness that is down, slow,
+    # or refusing must not cost the repository that record. The next run's
+    # checkpoint covers whatever the log holds by then, so nothing is lost by
+    # leaving this entry uncheckpointed for now.
+    - name: Push the log entry
+      shell: bash
+      # Not --force. Each log commit is parented on the one before, so an
+      # ordinary push rejects a rewritten log before any git-ratchet code
+      # runs -- which is a check worth keeping, not one to override.
+      run: git push origin 'refs/ratchet/log'
+
+    - name: Checkpoint the log
       shell: bash
       env:
         ORIGIN_KEY: ${{ inputs.origin-key }}
         GITHUB_TOKEN_INPUT: ${{ inputs.github-token }}
       run: |
-        KEYFILE="${RUNNER_TEMP}/origin.vkey"
+        KEYFILE="${RUNNER_TEMP}/origin.key"
         printf '%s\n' "$ORIGIN_KEY" > "$KEYFILE"
         chmod 600 "$KEYFILE"
         trap 'rm -f "$KEYFILE"' EXIT
 
-        if [ "${{ inputs.mode }}" = "tlog" ]; then
-          # Recording the ref and checkpointing the log are separate: one
-          # checkpoint covers whatever the log holds, so it takes no --ref.
-          git-ratchet log \
-            --mode tlog \
-            --ref "${{ inputs.ref }}"
+        # No --ref: a checkpoint covers whatever the log holds.
+        git-ratchet checkpoint \
+          --key "$KEYFILE" \
+          --policy "${{ inputs.policy }}" \
+          --github-token "$GITHUB_TOKEN_INPUT" \
+          --witness-timeout "${{ inputs.timeout }}s"
 
-          git-ratchet checkpoint \
-            --mode tlog \
-            --key "$KEYFILE" \
-            --policy "${{ inputs.policy }}" \
-            --github-token "$GITHUB_TOKEN_INPUT" \
-            --witness-timeout "${{ inputs.timeout }}s"
-        else
-          git-ratchet checkpoint \
-            --ref "${{ inputs.ref }}" \
-            --key "$KEYFILE" \
-            --policy "${{ inputs.policy }}" \
-            --witness-timeout "${{ inputs.timeout }}s"
-        fi
-
-    - name: Push checkpoint ref
-      if: inputs.mode != 'tlog'
+    - name: Push the checkpoint
       shell: bash
-      run: |
-        REF="${{ inputs.ref }}"
-        # checkpoint writes to refs/checkpoints/heads/<branch>
-        # or refs/checkpoints/tags/<tag>.
-        CHECKPOINT_REF="refs/checkpoints/${REF#refs/}"
-        git push --force origin "$CHECKPOINT_REF"
-
-    - name: Push log ref
-      if: inputs.mode == 'tlog'
-      shell: bash
-      # Not --force. Each log commit is parented on the one before, so an
-      # ordinary push rejects a rewritten log before any git-ratchet code
-      # runs -- which is a check worth keeping, not one to override.
       run: git push origin 'refs/ratchet/log'
