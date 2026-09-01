@@ -66,9 +66,9 @@ func TestEd25519SignVerify(t *testing.T) {
 	}
 }
 
-// git-checkpoint notes are Ed25519-only. C2SP signed-note assigns 0x06 to the
+// The constructions in note.go are Ed25519-only. C2SP signed-note assigns 0x06 to the
 // ML-DSA-44 cosigned_message, which commits to a log origin, a leaf range and a
-// Merkle root; a git-checkpoint note has none of those. See internal/note/tlog.go.
+// Merkle root, which a plain note body has none of. See internal/note/tlog.go.
 func TestMLDSA44RejectedForGitCheckpoint(t *testing.T) {
 	origin, err := GenerateKey("test-origin-pq", MLDSA44, RoleOrigin)
 	if err != nil {

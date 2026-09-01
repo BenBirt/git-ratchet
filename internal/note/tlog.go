@@ -31,7 +31,7 @@ import (
 // C2SP signed-note assigns 0x06 only to the ML-DSA-44 cosigned_message, which
 // commits to a log origin, a leaf range and a Merkle root, so it is defined
 // only over a tlog-checkpoint. A log signing its own checkpoint signs the same
-// message a witness would, over [0, size); git-checkpoint mode is Ed25519-only.
+// message a witness would, over [0, size).
 //
 // Key hashes and verifier keys are encoded identically here and in formats, so
 // they pass between the two unconverted.
@@ -48,7 +48,15 @@ func TlogCosigner(s *Signer) (sumdbnote.Signer, error) {
 // tlogSigner returns a formats signer for the given key. It signs a
 // tlog-checkpoint note body according to the key's algorithm: a plain note
 // signature for 0x01, and the timestamped cosigned_message for 0x04 and 0x06.
+//
+// A KMS-backed key has no local material to render as an skey, so an ML-DSA-44
+// one is wrapped as a crypto.Signer instead: formats builds the same
+// cosigned_message either way and calls Sign on it, which for a KMS key is a
+// remote call. Ed25519 does not need this path; see SignTlogCheckpoint.
 func tlogSigner(s *Signer) (sumdbnote.Signer, error) {
+	if len(s.seed) == 0 && s.SigType == MLDSA44 {
+		return fnote.NewMLDSASignerFromCrypto(s.Name, s.signer)
+	}
 	skey, err := s.SKey()
 	if err != nil {
 		return nil, err
@@ -135,8 +143,8 @@ func CosignTlogCheckpoint(signedNote string, signer *Signer) (string, error) {
 
 // ed25519CosignMessage returns the message an Ed25519 cosignature covers, per
 // the tlog-cosignature specification. It is generic over the note body, and is
-// used by the git-checkpoint cosignatures in note.go; tlog-checkpoint
-// cosignatures get the equivalent from the formats package.
+// used by the cosignatures in note.go; tlog-checkpoint cosignatures get the
+// equivalent from the formats package.
 func ed25519CosignMessage(timestamp uint64, body string) string {
 	return cosignatureV1Prefix + "\n" +
 		"time " + strconv.FormatUint(timestamp, 10) + "\n" +

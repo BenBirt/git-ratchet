@@ -79,7 +79,7 @@ func newTlogFixtureWithKeys(t *testing.T, originType, witnessType inote.SigType)
 }
 
 // writeTlogPolicyFile writes a policy in the field order tlog-policy defines:
-// the vkey precedes the optional URL, where the git-checkpoint policy parser
+// the vkey precedes the optional URL, where an earlier bespoke policy parser
 // puts the URL first. The two grammars are not interchangeable.
 func writeTlogPolicyFile(t *testing.T, dir string, log, witness *inote.Signer, witnessURL string) string {
 	t.Helper()

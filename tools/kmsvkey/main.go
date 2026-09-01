@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Command kmsvkey fetches an Ed25519 public key from GCP KMS and prints it
-// as a C2SP signed-note verifier key (vkey).
+// Command kmsvkey fetches a public key from GCP KMS and prints it as a C2SP
+// signed-note verifier key (vkey). The key may be Ed25519 or ML-DSA-44.
 package main
 
 import (
