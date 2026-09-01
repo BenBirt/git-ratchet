@@ -232,6 +232,13 @@ git fetch origin 'refs/ratchet/log:refs/ratchet/log'
 git-ratchet verify --policy ratchet-checkpoint.policy --ref refs/heads/main
 ```
 
+## Talk
+
+An overview deck lives in [`presentation/`](presentation/index.html) and is
+published to GitHub Pages on every change. Press `N` for speaker notes and `P`
+for a presenter window; the arrow keys and the on-screen buttons both move
+between slides.
+
 ## Disclaimer
 
 This is not an officially supported Google product. This project is not
