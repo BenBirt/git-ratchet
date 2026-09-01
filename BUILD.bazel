@@ -53,6 +53,5 @@ go_test(
     deps = [
         "//internal/gitlog",
         "//internal/gitutil",
-        "//internal/note",
     ],
 )
