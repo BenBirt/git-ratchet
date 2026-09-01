@@ -19,10 +19,7 @@ go_library(
     srcs = ["policy.go"],
     importpath = "github.com/project-oak/git-ratchet/internal/policy",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/note",
-        "@com_github_transparency_dev_formats//policy",
-    ],
+    deps = ["@com_github_transparency_dev_formats//policy"],
 )
 
 go_test(
