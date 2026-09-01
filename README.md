@@ -234,10 +234,12 @@ git-ratchet verify --policy ratchet-checkpoint.policy --ref refs/heads/main
 
 ## Talk
 
-An overview deck lives in [`presentation/`](presentation/index.html) and is
-published to GitHub Pages on every change. Press `N` for speaker notes and `P`
-for a presenter window; the arrow keys and the on-screen buttons both move
-between slides.
+An overview deck is published at
+**[project-oak.github.io/git-ratchet](https://project-oak.github.io/git-ratchet/)**,
+built from [`presentation/`](presentation/index.html) on every change to it.
+
+Press `N` for speaker notes and `P` for a presenter window; the arrow keys and
+the on-screen buttons both move between slides.
 
 ## Disclaimer
 
