@@ -16,7 +16,9 @@ package note
 
 import (
 	"bytes"
+	"crypto"
 	"encoding/binary"
+	"io"
 	"strings"
 	"testing"
 
@@ -115,7 +117,7 @@ func TestCosignWireLayout(t *testing.T) {
 }
 
 // TestCosignTlogCheckpointRejectsGitCheckpointBody checks that the two
-// checkpoint formats cannot be crossed over: a git-checkpoint note is not a
+// note bodies cannot be crossed over: a plain ref-binding note is not a
 // tlog-checkpoint and must not be cosigned as one.
 func TestCosignTlogCheckpointRejectsGitCheckpointBody(t *testing.T) {
 	signer, err := GenerateKey("test-origin", Ed25519Origin, RoleOrigin)
@@ -134,7 +136,7 @@ func TestCosignTlogCheckpointRejectsGitCheckpointBody(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := CosignTlogCheckpoint(signed, cosigner); err == nil {
-		t.Error("expected a git-checkpoint body to be rejected as a tlog checkpoint")
+		t.Error("expected a non-checkpoint body to be rejected as a tlog checkpoint")
 	}
 }
 
@@ -253,7 +255,7 @@ func TestMLDSA44MessageMatchesSpec(t *testing.T) {
 }
 
 // TestSignTlogCheckpointRejectsGitCheckpointBody is the counterpart to the
-// cosigning check: a log must not sign a git-checkpoint note as a tlog one.
+// cosigning check: a log must not sign a non-checkpoint note as a tlog one.
 func TestSignTlogCheckpointRejectsGitCheckpointBody(t *testing.T) {
 	signer, err := GenerateKey("test-origin", Ed25519Origin, RoleOrigin)
 	if err != nil {
@@ -262,7 +264,7 @@ func TestSignTlogCheckpointRejectsGitCheckpointBody(t *testing.T) {
 	gitBody := "github.com/example/repo refs/heads/main\n" +
 		"4f0f30afb02b71590f0b2e0a67f0b846715e1d04\n"
 	if _, err := SignTlogCheckpoint(gitBody, signer); err == nil {
-		t.Error("expected a git-checkpoint body to be rejected as a tlog checkpoint")
+		t.Error("expected a non-checkpoint body to be rejected as a tlog checkpoint")
 	}
 }
 
@@ -292,5 +294,75 @@ func TestSignTlogCheckpointRoundTrip(t *testing.T) {
 		if _, _, _, err := flog.ParseCheckpoint([]byte(tampered), testOrigin, v); err == nil {
 			t.Errorf("sigType 0x%02x: signature verified over a different tree size", sigType)
 		}
+	}
+}
+
+// remoteSigner wraps a crypto.Signer and hides everything else, standing in
+// for a KMS key: signing is the only operation, and there is no key material
+// to read.
+type remoteSigner struct{ inner crypto.Signer }
+
+func (r remoteSigner) Public() crypto.PublicKey { return r.inner.Public() }
+func (r remoteSigner) Sign(rand io.Reader, msg []byte, opts crypto.SignerOpts) ([]byte, error) {
+	return r.inner.Sign(rand, msg, opts)
+}
+
+// newRemoteMLDSASigner builds a Signer holding no seed, as NewKMSSigner does.
+func newRemoteMLDSASigner(t *testing.T, name string, role KeyRole) *Signer {
+	t.Helper()
+	priv, err := mldsa.GenerateKey(mldsa.MLDSA44())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := priv.PublicKey()
+	return &Signer{
+		Name:    name,
+		SigType: MLDSA44,
+		Role:    role,
+		hash:    keyHash(name, pub.Bytes(), byte(MLDSA44)),
+		signer:  remoteSigner{priv},
+		pub:     pub,
+		seed:    nil,
+	}
+}
+
+// TestTlogSignerFromCryptoSigner covers the path a KMS-backed ML-DSA-44 key
+// takes. There is no local key material, so SKey cannot render one and the
+// signer has to be built from the crypto.Signer instead. The signatures it
+// produces must be the same ones a local key produces.
+func TestTlogSignerFromCryptoSigner(t *testing.T) {
+	origin := newRemoteMLDSASigner(t, "test.example/log", RoleOrigin)
+	witness := newRemoteMLDSASigner(t, "test.example/witness", RoleCosigner)
+
+	if _, err := origin.SKey(); err == nil {
+		t.Fatal("expected SKey to fail for a signer with no local key material")
+	}
+
+	body := string(tlog.NewCheckpoint(origin.Name, 7, tlog.HashLeaf([]byte("root"))).Marshal())
+	signed, err := SignTlogCheckpoint(body, origin)
+	if err != nil {
+		t.Fatalf("SignTlogCheckpoint: %v", err)
+	}
+
+	cosig, err := CosignTlogCheckpoint(signed, witness)
+	if err != nil {
+		t.Fatalf("CosignTlogCheckpoint: %v", err)
+	}
+	full := AppendSignature(signed, cosig)
+
+	// Both signatures must verify under the ordinary verifiers, which know
+	// nothing about how the key was held.
+	ov, err := fnote.NewVerifier(origin.VKey())
+	if err != nil {
+		t.Fatalf("origin verifier: %v", err)
+	}
+	wv, err := fnote.NewVerifier(witness.VKey())
+	if err != nil {
+		t.Fatalf("witness verifier: %v", err)
+	}
+	if _, _, n, err := flog.ParseCheckpoint([]byte(full), origin.Name, ov, wv); err != nil {
+		t.Fatalf("ParseCheckpoint: %v", err)
+	} else if len(n.Sigs) != 2 {
+		t.Fatalf("expected 2 signatures, got %d", len(n.Sigs))
 	}
 }

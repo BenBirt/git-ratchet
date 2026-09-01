@@ -59,8 +59,8 @@ const (
 	// construction, whether the signer is the log or a witness. That message
 	// commits to a log origin, a leaf range and a Merkle root, so it is
 	// well defined only over a tlog-checkpoint. The constructions in this
-	// file, which serve git-checkpoint mode, are therefore Ed25519-only;
-	// ML-DSA-44 keys are signed and verified in tlog.go, by
+	// file are generic over a note body and so are Ed25519-only; ML-DSA-44
+	// keys are signed and verified in tlog.go, by
 	// github.com/transparency-dev/formats.
 	MLDSA44 SigType = 0x06
 )
@@ -212,7 +212,8 @@ func Sign(body string, signer *Signer) (string, error) {
 
 	if signer.SigType != Ed25519Origin {
 		return "", fmt.Errorf("unsupported origin signature type: 0x%02x "+
-			"(git-checkpoint notes are signed with Ed25519; ML-DSA-44 keys require --mode tlog)", signer.SigType)
+			"(a plain note signature is Ed25519; an ML-DSA-44 key signs a "+
+			"tlog-checkpoint, via SignTlogCheckpoint)", signer.SigType)
 	}
 	sig, err := signer.signer.Sign(nil, []byte(body), crypto.Hash(0))
 	if err != nil {
@@ -234,9 +235,8 @@ func Sign(body string, signer *Signer) (string, error) {
 // Wire format: keyID(4) || timestamp(8) || signature(64).
 //
 // Only Ed25519 cosigner keys are accepted. The ML-DSA-44 cosigned message
-// commits to a log origin, a leaf range and a Merkle root, none of which a
-// git-checkpoint note has; see CosignTlogCheckpoint for the tlog-checkpoint
-// case, which does.
+// commits to a log origin, a leaf range and a Merkle root, which a note has
+// only if it is a tlog-checkpoint; see CosignTlogCheckpoint for that case.
 func Cosign(signedNote string, signer *Signer) (string, error) {
 	if signer.Role != RoleCosigner {
 		return "", fmt.Errorf("Cosign requires a cosigner key, got origin")
@@ -249,7 +249,8 @@ func Cosign(signedNote string, signer *Signer) (string, error) {
 
 	if signer.SigType != Ed25519Cosigner {
 		return "", fmt.Errorf("unsupported cosigner signature type: 0x%02x "+
-			"(git-checkpoint notes are cosigned with Ed25519; ML-DSA-44 keys require --mode tlog)", signer.SigType)
+			"(this construction is Ed25519; an ML-DSA-44 key cosigns a "+
+			"tlog-checkpoint, via CosignTlogCheckpoint)", signer.SigType)
 	}
 
 	timestamp := uint64(time.Now().Unix())

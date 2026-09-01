@@ -263,10 +263,9 @@ func verifySingleRefTlog(repoDir, ref string, l *gitlog.Log) error {
 // cosignWithWitness performs one add-checkpoint exchange with a witness.
 //
 // A witness holding a different size answers with the size it does hold, and
-// the proof has to be regenerated from there: a consistency proof is anchored
-// to a specific size, unlike the commit chain git-checkpoint mode sends, which
-// spans any gap. One retry is enough, because the size the witness reports is
-// the size it will accept.
+// the proof has to be regenerated from there, a consistency proof being
+// anchored to a specific size. One retry is enough, because the size the
+// witness reports is the size it will accept.
 func cosignWithWitness(ctx context.Context, client *http.Client, endpoint *url.URL, l *gitlog.Log, oldSize uint64, signed string) (string, error) {
 	w := whttp.NewWitness(endpoint, client)
 

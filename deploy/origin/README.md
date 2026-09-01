@@ -1,6 +1,6 @@
 # Deploying the git-ratchet origin KMS key
 
-This directory provisions a GCP Cloud KMS Ed25519 signing key for the
+This directory provisions a GCP Cloud KMS signing key for the
 git-ratchet log origin. The `git-ratchet checkpoint` command uses this key
 to sign checkpoints via the `--kms-key` flag.
 
@@ -34,6 +34,12 @@ bazel run //deploy/origin:origin.apply
 
 This creates a KMS key ring (`git-ratchet-origin`) and an Ed25519 signing
 key (`origin-signing-key`).
+
+For a post-quantum origin key, set `algorithm = "PQ_SIGN_ML_DSA_44"` in
+[`main.tf`](main.tf) instead. git-ratchet supports that parameter set and no
+other: C2SP signed-note assigns an algorithm identifier to ML-DSA-44 alone, so
+a key of another size could be signed with but not named in a note or a
+policy.
 
 ## 3. Extract the origin vkey
 

@@ -150,7 +150,7 @@ The private key goes to stdout in the [signed-note](https://c2sp.org/signed-note
 
 The `--name` is load-bearing: it becomes the log's origin, which is what a witness keys its state by. `--algo` is `ed25519` or `mldsa44`.
 
-Alternatively, [deploy/origin/README.md](deploy/origin/README.md) provisions a GCP Cloud KMS Ed25519 key that never leaves the HSM, used with `--kms-key` and `--origin` in place of `--key`.
+Alternatively, [deploy/origin/README.md](deploy/origin/README.md) provisions a GCP Cloud KMS key that never leaves the HSM, used with `--kms-key` and `--origin` in place of `--key`. Ed25519 (`EC_SIGN_ED25519`) and ML-DSA-44 (`PQ_SIGN_ML_DSA_44`) keys are both supported; other ML-DSA parameter sets are not, because signed-note assigns an algorithm identifier to ML-DSA-44 alone.
 
 ### 2. Set up a witness
 
