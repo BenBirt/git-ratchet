@@ -215,6 +215,7 @@ jobs:
       - uses: project-oak/git-ratchet/actions/cosign@main
         with:
           witness-key: ${{ secrets.WITNESS_KEY }}
+          version: v0.3.0
 ```
 
 The issue title is `checkpoint: <origin>`. The `if` guard prevents the workflow

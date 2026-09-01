@@ -22,6 +22,10 @@ inputs:
   witness-key:
     description: 'Witness private key file contents, as written by genkey'
     required: true
+  version:
+    description: 'cosign version to install (e.g. "v0.3.0"). Defaults to latest.'
+    required: false
+    default: 'latest'
 
 runs:
   using: 'composite'
@@ -33,6 +37,7 @@ runs:
       uses: project-oak/git-ratchet/actions/setup@dd5ec29512405226f6858958108040ab39458845 # v0.3.0
       with:
         tool: cosign
+        version: ${{ inputs.version }}
 
     - name: Parse issue
       id: parse

@@ -10,9 +10,15 @@ This action should be triggered by `issues: opened` events.
 
 ## Inputs
 
-| Name | Required | Description |
-|------|----------|-------------|
-| `witness-key` | Yes | Witness private key file contents, as written by `genkey` |
+| Name | Required | Default | Description |
+|------|----------|---------|-------------|
+| `witness-key` | Yes | — | Witness private key file contents, as written by `genkey` |
+| `version` | No | `latest` | cosign version to install. |
+
+Pin `version` alongside the action's own ref. The two are separate artifacts:
+the action's ref selects the workflow steps, `version` selects the binary they
+run, and left at `latest` the binary changes under a pinned action the moment
+a release is published.
 
 ## What It Does
 
@@ -69,6 +75,7 @@ jobs:
       - uses: project-oak/git-ratchet/actions/cosign@main
         with:
           witness-key: ${{ secrets.WITNESS_KEY }}
+          version: v0.3.0
 ```
 
 ## Further Reading
