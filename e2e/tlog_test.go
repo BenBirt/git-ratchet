@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	fnote "github.com/transparency-dev/formats/note"
@@ -129,7 +130,7 @@ func startTlogWitness(t *testing.T, originKey, witnessKey *inote.Signer) string 
 // logRefs runs git-ratchet log in tlog mode, returning its output.
 func (f *tlogFixture) logRefs(t *testing.T, refs ...string) (string, error) {
 	t.Helper()
-	args := []string{"log", "--mode", "tlog", "--repo", f.repoDir}
+	args := []string{"log", "--repo", f.repoDir}
 	for _, ref := range refs {
 		args = append(args, "--ref", ref)
 	}
@@ -152,7 +153,7 @@ func (f *tlogFixture) checkpoint(t *testing.T) (string, error) {
 	t.Helper()
 	out, err := exec.Command(f.ratchetBin,
 		"checkpoint",
-		"--mode", "tlog",
+
 		"--repo", f.repoDir,
 		"--key", f.keyPath,
 		"--policy", f.policyPath,
@@ -166,7 +167,7 @@ func (f *tlogFixture) checkpointWithAPI(t *testing.T, api string) (string, error
 	t.Helper()
 	cmd := exec.Command(f.ratchetBin,
 		"checkpoint",
-		"--mode", "tlog",
+
 		"--repo", f.repoDir,
 		"--key", f.keyPath,
 		"--policy", f.policyPath,
@@ -198,7 +199,7 @@ func (f *tlogFixture) logAndCheckpoint(t *testing.T, refs ...string) string {
 // verify runs git-ratchet verify in tlog mode, returning its output.
 func (f *tlogFixture) verify(t *testing.T, refs ...string) (string, error) {
 	t.Helper()
-	args := []string{"verify", "--mode", "tlog", "--repo", f.repoDir, "--policy", f.policyPath}
+	args := []string{"verify", "--repo", f.repoDir, "--policy", f.policyPath}
 	for _, ref := range refs {
 		args = append(args, "--ref", ref)
 	}
@@ -741,4 +742,98 @@ func testTlogIssueWitness(t *testing.T, f *tlogFixture) {
 	if out, err := f.verify(t, "refs/heads/main"); err != nil {
 		t.Fatalf("verify after the second round: %v\n%s", err, out)
 	}
+}
+
+func mustFindBinary(t *testing.T) string {
+	t.Helper()
+	if p := os.Getenv("GIT_RATCHET_BIN"); p != "" {
+		return p
+	}
+	if srcDir := os.Getenv("TEST_SRCDIR"); srcDir != "" {
+		for _, ws := range []string{"_main", "__main__"} {
+			p := filepath.Join(srcDir, ws, "git-ratchet_", "git-ratchet")
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
+	}
+	t.Fatal("git-ratchet binary not found; run with: bazel test //e2e:e2e_test")
+	return ""
+}
+func mustGenerateKey(t *testing.T, name string, sigType inote.SigType, role inote.KeyRole) *inote.Signer {
+	t.Helper()
+	s, err := inote.GenerateKey(name, sigType, role)
+	if err != nil {
+		t.Fatalf("generating key %s: %v", name, err)
+	}
+	return s
+}
+
+func initTestRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	run(t, dir, "git", "init", "--initial-branch=main", ".")
+	run(t, dir, "git", "config", "user.email", "test@test.com")
+	run(t, dir, "git", "config", "user.name", "Test")
+	return dir
+}
+
+var e2eFileCounter int64
+
+func makeCommit(t *testing.T, dir, msg string) string {
+	t.Helper()
+	n := atomic.AddInt64(&e2eFileCounter, 1)
+	f := filepath.Join(dir, fmt.Sprintf("file-%d.txt", n))
+	if err := os.WriteFile(f, []byte(msg+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, dir, "git", "add", ".")
+	run(t, dir, "git", "commit", "-m", msg)
+	out := runOutput(t, dir, "git", "rev-parse", "HEAD")
+	return strings.TrimSpace(out)
+}
+
+func writeKeyFile(t *testing.T, dir string, s *inote.Signer) string {
+	t.Helper()
+	p := filepath.Join(dir, "origin.key")
+	skey, err := s.SKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(skey+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func mustWriteKey(t *testing.T, path string, s *inote.Signer) {
+	t.Helper()
+	skey, err := s.SKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(skey+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func run(t *testing.T, dir string, name string, args ...string) {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s %s failed: %v\n%s", name, strings.Join(args, " "), err, out)
+	}
+}
+
+func runOutput(t *testing.T, dir string, name string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("%s %s failed: %v", name, strings.Join(args, " "), err)
+	}
+	return string(out)
 }

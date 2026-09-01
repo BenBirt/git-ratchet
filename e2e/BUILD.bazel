@@ -16,13 +16,9 @@ load("@rules_go//go:def.bzl", "go_test")
 
 go_test(
     name = "e2e_test",
-    srcs = [
-        "integration_test.go",
-        "tlog_test.go",
-    ],
+    srcs = ["tlog_test.go"],
     data = [
         "//:git-ratchet",
-        "//witness",
         "//witness/cosign",
     ],
     deps = [
