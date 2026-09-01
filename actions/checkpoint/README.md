@@ -47,8 +47,8 @@ permissions:
 ## Usage
 
 A checkpoint covers whatever the log holds, so something has to put a ref in
-the log first. On its own this Action would checkpoint a log nothing had
-written to.
+the log first. On its own this Action would checkpoint a log with no new
+entries.
 
 ```yaml
 name: Checkpoint

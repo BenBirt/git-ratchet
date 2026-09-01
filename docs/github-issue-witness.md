@@ -303,10 +303,6 @@ jobs:
 `github.token` is scoped to the origin repository, so it cannot open an issue
 on the witness; this needs a token that can.
 
-The `log` job earns its place by running first and pushing on its own: a
-witness that is down, slow, or refusing then costs a checkpoint, not the
-record of where the ref pointed.
-
 ## Advantages over HTTP witnesses
 
 - **No server to deploy or maintain.** The witness runs entirely as a GitHub
