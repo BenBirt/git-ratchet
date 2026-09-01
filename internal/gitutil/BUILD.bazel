@@ -27,8 +27,6 @@ go_library(
 
 go_test(
     name = "gitutil_test",
-    srcs = [
-        "commit_hash_test.go",
-    ],
+    srcs = ["commit_hash_test.go"],
     embed = [":gitutil"],
 )
