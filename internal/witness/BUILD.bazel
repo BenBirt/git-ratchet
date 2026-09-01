@@ -12,26 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "witness",
     srcs = [
-        "client.go",
         "httpmsg.go",
         "issuetransport.go",
-        "verify.go",
     ],
     importpath = "github.com/project-oak/git-ratchet/internal/witness",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/gitutil",
-        "@com_github_google_go_github_v68//github",
-    ],
-)
-
-go_test(
-    name = "witness_test",
-    srcs = ["verify_test.go"],
-    embed = [":witness"],
+    deps = ["@com_github_google_go_github_v68//github"],
 )
