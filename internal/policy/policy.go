@@ -21,10 +21,8 @@ import (
 	fpolicy "github.com/transparency-dev/formats/policy"
 )
 
-// tlog mode uses the C2SP tlog-policy format, https://c2sp.org/tlog-policy,
-// parsed and evaluated by github.com/transparency-dev/formats/policy. This is
-// the conformant policy format; the bespoke one policy.go parses predates it
-// and is expected to be replaced by this one.
+// Policies use the C2SP tlog-policy format, https://c2sp.org/tlog-policy,
+// parsed and evaluated by github.com/transparency-dev/formats/policy.
 
 // FromPath reads and parses a tlog-policy file.
 func FromPath(path string) (*fpolicy.TLogPolicy, error) {

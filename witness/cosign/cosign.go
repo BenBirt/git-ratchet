@@ -16,9 +16,6 @@
 // as a POST, and writes the cosignature line to stdout. It is the witness half
 // of a github-issue witness.
 //
-// git-checkpoint mode is not served here. Its witnesses speak HTTP only; see
-// the witness command.
-//
 // Usage:
 //
 //	cosign \
